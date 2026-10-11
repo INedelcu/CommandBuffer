@@ -130,6 +130,8 @@ static void BenchInts(const char* name, std::uint64_t batch, Release release = R
 
 constexpr std::uint64_t kCommands = 20'000'000;
 
+// The benchmark's own command type, used by both queues below. The stop command is built
+// into the library: cb::kCmd_Stop, from CommandBuffer.h.
 enum BenchCommand : cb::CommandType
 {
     kCmd_Add = cb::kCmd_FirstUser, // payload: std::uint64_t
@@ -190,7 +192,7 @@ static void BenchCommandBuffer(const char* name, std::uint64_t submitEvery)
 // The textbook queue: every command is a fixed-size struct, pushed and popped under a mutex.
 struct QueuedCommand
 {
-    cb::CommandType type;
+    cb::CommandType type; // kCmd_Add, or the built-in cb::kCmd_Stop
     std::uint64_t value;
 };
 

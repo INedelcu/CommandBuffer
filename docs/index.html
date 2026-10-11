@@ -539,10 +539,17 @@ renderThread.join();</code></pre></div>
   <h2>The obvious version</h2>
   <p>Most people start with the textbook thread-safe queue. It has three parts: a container that holds the commands, a mutex that makes the container safe to use from two threads, and a condition variable that lets the consumer sleep while there is nothing to do. This is the version the measurements compare against:</p>
   <div class="codeblock"><div class="file"><b>bench/Benchmark.cpp</b><span>the baseline</span></div>
-<pre><code class="language-cpp">// Every command is a fixed-size struct, pushed and popped under a mutex.
+<pre><code class="language-cpp">// The benchmark's own command type, used by both queues below. The stop command is built
+// into the library: cb::kCmd_Stop, from CommandBuffer.h.
+enum BenchCommand : cb::CommandType
+{
+    kCmd_Add = cb::kCmd_FirstUser, // payload: std::uint64_t
+};
+
+// The textbook queue: every command is a fixed-size struct, pushed and popped under a mutex.
 struct QueuedCommand
 {
-    cb::CommandType type;
+    cb::CommandType type; // kCmd_Add, or the built-in cb::kCmd_Stop
     std::uint64_t value;
 };
 
@@ -603,6 +610,7 @@ consumer.join();</code></pre></div>
   <p>The rest of this section walks through each piece. If it is all familiar, skip to <a href="#baseline-cost">why it is slow</a>.</p>
 
   <h3>The command type</h3>
+  <p>The two command types come from different places, which is why one has a <code>cb::</code> prefix and the other does not. <code>kCmd_Add</code> is the benchmark's own command type, declared in the global namespace the way an application declares its commands. <code>kCmd_Stop</code> is one of the two command types built into the library, so it lives in namespace <code>cb</code> (<a href="#step-12">step 12</a> shows both kinds). The mutex queue reuses the same numbers, so both queues run exactly the same commands.</p>
   <p>Every element of the queue has the same type, so every command gets the same fixed-size slot: a type and one 8-byte payload. That works for the benchmark's <code>kCmd_Add</code>. A <code>Draw</code> command with a 16-byte payload would not fit, unless <code>value</code> became a union as large as the biggest command, and then every command pays for the biggest one. A <code>CreateMesh</code> with its vertex array would need a pointer to separately allocated memory. That limit is why <a href="#step-1">step 1</a> switches to a ring of raw bytes, where each command takes exactly the space it needs.</p>
 
   <h3>What each member is for</h3>
