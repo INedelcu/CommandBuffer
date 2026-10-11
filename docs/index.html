@@ -1,0 +1,1944 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<title>SPSC Command Buffer</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+<link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,600;12..96,800&family=JetBrains+Mono:wght@400;600&family=Source+Serif+4:ital,opsz,wght@0,8..60,400;0,8..60,600;1,8..60,400&display=swap">
+<style>
+/* Layout: a long-form technical article. Wide screens get a sticky step index on the left;
+   prose keeps a ~68ch measure while code, diagrams and the simulator use the full column.
+   Two signature hues stand for the two threads everywhere: orange = producer, teal = consumer. */
+:root {
+  --bg: #f1f3f6;
+  --surface: #ffffff;
+  --surface-2: #e7ebf0;
+  --ink: #141a23;
+  --ink-2: #445063;
+  --ink-3: #66727f;
+  --rule: #d2d9e2;
+  --producer: #bf530e;
+  --producer-soft: #f8dbc6;
+  --consumer: #0a7882;
+  --consumer-soft: #cbeaed;
+  --skip: #8b96a6;
+  --free: #dde3ea;
+  --code-bg: #fafbfc;
+  --hl-keyword: #7136b3;
+  --hl-type: #1d5ca8;
+  --hl-string: #0a7882;
+  --hl-number: #b04c0b;
+  --hl-comment: #6a7584;
+  --hl-meta: #85590a;
+  --font-display: "Bricolage Grotesque", "Segoe UI", system-ui, sans-serif;
+  --font-body: "Source Serif 4", "Iowan Old Style", Georgia, serif;
+  --font-mono: "JetBrains Mono", "Cascadia Code", ui-monospace, Consolas, monospace;
+  color-scheme: light;
+}
+@media (prefers-color-scheme: dark) {
+  :root:not([data-theme="light"]) {
+    --bg: #0d1117; --surface: #141a22; --surface-2: #1c2430; --ink: #e4e9f0; --ink-2: #a8b2c0;
+    --ink-3: #808b9b; --rule: #29333f; --producer: #f08b4e; --producer-soft: #4b2915;
+    --consumer: #3dbfca; --consumer-soft: #103c42; --skip: #6c7788; --free: #212a36;
+    --code-bg: #10161d; --hl-keyword: #c49cf2; --hl-type: #7db6ff; --hl-string: #7fd3da;
+    --hl-number: #f5a26f; --hl-comment: #7e8999; --hl-meta: #e3bb67;
+    color-scheme: dark;
+  }
+}
+:root[data-theme="dark"] {
+  --bg: #0d1117; --surface: #141a22; --surface-2: #1c2430; --ink: #e4e9f0; --ink-2: #a8b2c0;
+  --ink-3: #808b9b; --rule: #29333f; --producer: #f08b4e; --producer-soft: #4b2915;
+  --consumer: #3dbfca; --consumer-soft: #103c42; --skip: #6c7788; --free: #212a36;
+  --code-bg: #10161d; --hl-keyword: #c49cf2; --hl-type: #7db6ff; --hl-string: #7fd3da;
+  --hl-number: #f5a26f; --hl-comment: #7e8999; --hl-meta: #e3bb67;
+  color-scheme: dark;
+}
+
+* { box-sizing: border-box; }
+html { scroll-behavior: smooth; }
+@media (prefers-reduced-motion: reduce) { html { scroll-behavior: auto; } }
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--ink);
+  font-family: var(--font-body);
+  font-size: 1.125rem;
+  line-height: 1.62;
+  -webkit-font-smoothing: antialiased;
+}
+a { color: var(--consumer); text-underline-offset: 0.18em; text-decoration-thickness: 1px; }
+a:hover { text-decoration-thickness: 2px; }
+:focus-visible { outline: 2px solid var(--producer); outline-offset: 2px; border-radius: 3px; }
+
+.page {
+  display: grid;
+  grid-template-columns: minmax(0, 1fr);
+  gap: 56px;
+  max-width: 1180px;
+  margin: 0 auto;
+  padding-inline: 20px;
+  padding-block: 0 96px;
+}
+@media (min-width: 1120px) {
+  .page { grid-template-columns: 230px minmax(0, 800px); justify-content: center; }
+}
+
+/* ---------- step index ---------- */
+.toc { display: none; }
+@media (min-width: 1120px) {
+  .toc {
+    display: block;
+    position: sticky;
+    top: calc(env(safe-area-inset-top, 0px) + 28px);
+    align-self: start;
+    max-height: calc(100vh - 56px);
+    overflow-y: auto;
+    padding-top: 40px;
+    font-family: var(--font-mono);
+    font-size: 0.75rem;
+    line-height: 1.4;
+  }
+}
+.toc-title { font-family: var(--font-display); font-weight: 800; font-size: 0.95rem; color: var(--ink); margin: 0 0 14px; }
+.toc ol { list-style: none; margin: 0; padding: 0; display: grid; gap: 2px; }
+.toc a {
+  display: grid;
+  grid-template-columns: 2.4em 1fr;
+  gap: 4px;
+  padding: 5px 8px;
+  border-radius: 5px;
+  color: var(--ink-2);
+  text-decoration: none;
+}
+.toc a:hover { background: var(--surface-2); color: var(--ink); }
+.toc a.active { background: var(--surface); color: var(--ink); box-shadow: inset 2px 0 0 var(--producer); }
+.toc .n { color: var(--ink-3); }
+.toc li.sep { height: 10px; }
+
+.contents-mobile { margin-top: 28px; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); }
+.contents-mobile summary { cursor: pointer; padding: 12px 16px; font-family: var(--font-mono); font-size: 0.8rem; text-transform: uppercase; letter-spacing: 0.08em; color: var(--ink-2); }
+.contents-mobile ol { margin: 0; padding: 0 16px 14px 36px; font-size: 0.95rem; }
+@media (min-width: 1120px) { .contents-mobile { display: none; } }
+
+/* ---------- article ---------- */
+main { min-width: 0; }
+/* Running text keeps a reading measure; code, tables, charts and the simulator use the full column. */
+main :where(section, header) > :where(p, ul, ol, h2, h3) { max-width: 68ch; }
+.rule, .evidence { max-width: 72ch; }
+section { padding-top: 56px; }
+section + section { border-top: 1px solid var(--rule); margin-top: 56px; }
+
+h1, h2, h3 { font-family: var(--font-display); font-weight: 800; text-wrap: balance; color: var(--ink); }
+h1 { font-size: clamp(2.3rem, 5.2vw, 3.7rem); line-height: 1.02; letter-spacing: -0.02em; margin: 0.2em 0 0.35em; }
+h2 { font-size: clamp(1.55rem, 3vw, 2.05rem); line-height: 1.12; letter-spacing: -0.01em; margin: 0.1em 0 0.6em; }
+h3 { font-size: 1.22rem; line-height: 1.25; margin: 1.8em 0 0.5em; font-weight: 600; }
+p { margin: 0 0 1em; }
+ul, ol { padding-left: 1.3em; margin: 0 0 1em; }
+li { margin-bottom: 0.35em; }
+strong { font-weight: 600; }
+
+.eyebrow {
+  font-family: var(--font-mono);
+  font-size: 0.78rem;
+  font-weight: 600;
+  text-transform: uppercase;
+  letter-spacing: 0.1em;
+  color: var(--producer);
+  margin: 0;
+}
+.eyebrow .of { color: var(--ink-3); font-weight: 400; }
+
+code, kbd { font-family: var(--font-mono); font-size: 0.86em; }
+:not(pre) > code { background: var(--surface-2); padding: 0.08em 0.32em; border-radius: 4px; overflow-wrap: anywhere; }
+
+/* ---------- hero ---------- */
+.hero { padding-top: 48px; }
+.hero .lede { font-size: 1.28rem; line-height: 1.5; color: var(--ink-2); max-width: 60ch; }
+.meta {
+  display: flex; flex-wrap: wrap; gap: 8px 22px;
+  font-family: var(--font-mono); font-size: 0.78rem; color: var(--ink-3);
+  margin: 18px 0 0;
+}
+.meta span::before { content: "▪ "; color: var(--producer); }
+
+/* ---------- code ---------- */
+.codeblock { margin: 1.4em 0 1.6em; border: 1px solid var(--rule); border-radius: 8px; background: var(--code-bg); overflow: hidden; }
+.codeblock .file {
+  display: flex; justify-content: space-between; gap: 12px; flex-wrap: wrap;
+  font-family: var(--font-mono); font-size: 0.72rem; color: var(--ink-3);
+  padding: 7px 14px; border-bottom: 1px solid var(--rule); background: var(--surface);
+}
+.codeblock .file b { color: var(--ink-2); font-weight: 600; }
+pre { margin: 0; overflow-x: auto; padding: 14px 16px; font-size: 0.82rem; line-height: 1.55; tab-size: 4; }
+pre code { font-size: inherit; background: none; padding: 0; color: var(--ink); }
+.hljs-keyword, .hljs-built_in { color: var(--hl-keyword); }
+.hljs-type, .hljs-title, .hljs-title.class_, .hljs-title.function_ { color: var(--hl-type); }
+.hljs-string { color: var(--hl-string); }
+.hljs-number, .hljs-literal { color: var(--hl-number); }
+.hljs-comment { color: var(--hl-comment); font-style: italic; }
+.hljs-meta, .hljs-meta .hljs-keyword { color: var(--hl-meta); }
+.hljs-meta .hljs-string { color: var(--hl-string); }
+
+/* ---------- callouts ---------- */
+.rule {
+  display: grid; grid-template-columns: auto minmax(0, 1fr); gap: 4px 16px;
+  margin: 1.6em 0; padding: 16px 18px;
+  background: var(--surface); border: 1px solid var(--rule); border-left: 3px solid var(--producer);
+  border-radius: 0 8px 8px 0;
+}
+.rule .tag { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; color: var(--producer); padding-top: 0.35em; white-space: nowrap; }
+.rule p { margin: 0; }
+.rule p + p { margin-top: 0.6em; grid-column: 2; }
+.note { color: var(--ink-2); font-size: 1rem; }
+.evidence {
+  margin: 1.4em 0; padding: 12px 16px; border-radius: 8px;
+  background: var(--consumer-soft); color: var(--ink);
+  font-size: 1rem;
+}
+.evidence .tag { font-family: var(--font-mono); font-size: 0.7rem; font-weight: 600; letter-spacing: 0.08em; text-transform: uppercase; color: var(--consumer); display: block; margin-bottom: 2px; }
+
+/* ---------- figures & tables ---------- */
+figure { margin: 1.6em 0 2em; }
+figcaption { font-size: 0.92rem; color: var(--ink-3); margin-top: 10px; max-width: 68ch; }
+.diagram-wrap { overflow-x: auto; }
+svg text { font-family: var(--font-mono); }
+.table-wrap { overflow-x: auto; margin: 1.4em 0 1.8em; border: 1px solid var(--rule); border-radius: 8px; background: var(--surface); }
+table { border-collapse: collapse; width: 100%; font-size: 0.95rem; }
+th, td { text-align: left; vertical-align: top; padding: 9px 14px; border-bottom: 1px solid var(--rule); }
+tr:last-child td { border-bottom: none; }
+th { font-family: var(--font-mono); font-size: 0.72rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.07em; color: var(--ink-3); background: var(--surface-2); }
+td.num, th.num { text-align: right; font-variant-numeric: tabular-nums; white-space: nowrap; }
+td code { white-space: nowrap; }
+.who-p { color: var(--producer); font-weight: 600; }
+.who-c { color: var(--consumer); font-weight: 600; }
+
+/* memory ordering section */
+.pair { display: grid; grid-template-columns: repeat(auto-fit, minmax(270px, 1fr)); gap: 12px; margin: 1.2em 0 1.6em; }
+.pair .codeblock { margin: 0; min-width: 0; }
+.orders { margin: 1.2em 0 1.8em; }
+.orders > div { display: grid; grid-template-columns: minmax(0, 10.5em) minmax(0, 1fr); gap: 4px 20px; padding: 14px 0; border-top: 1px solid var(--rule); }
+.orders > div:last-child { border-bottom: 1px solid var(--rule); }
+.orders dt { font-family: var(--font-mono); font-size: 0.84rem; font-weight: 600; color: var(--ink); padding-top: 0.2em; }
+.orders dt span { display: block; font-weight: 400; color: var(--ink-3); font-size: 0.74rem; margin-top: 2px; }
+.orders dd { margin: 0; font-size: 1rem; }
+.orders dd p { margin: 0 0 0.4em; }
+.orders dd p:last-child { margin-bottom: 0; }
+.orders .here { color: var(--ink-2); font-size: 0.94rem; }
+@media (max-width: 560px) { .orders > div { grid-template-columns: minmax(0, 1fr); } }
+.hb svg { width: 100%; height: auto; min-width: 560px; display: block; }
+.f-psoft { fill: var(--producer-soft); stroke: var(--producer); }
+.f-csoft { fill: var(--consumer-soft); stroke: var(--consumer); }
+.s-ink { stroke: var(--ink); }
+.t-ink3 { fill: var(--ink-3); }
+td.yes { color: var(--producer); font-weight: 600; }
+td.no { color: var(--ink-3); }
+
+/* memory map */
+.memmap { min-width: 680px; }
+.memmap td { padding: 8px 10px; }
+.memmap .off { font-family: var(--font-mono); font-size: 0.78rem; color: var(--ink-3); white-space: nowrap; }
+.slots { display: grid; grid-template-columns: repeat(8, minmax(0, 1fr)); gap: 2px; }
+.slot { font-family: var(--font-mono); font-size: 0.66rem; padding: 6px 3px; text-align: center; border-radius: 3px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.slot.p { background: var(--producer-soft); color: var(--ink); }
+.slot.c { background: var(--consumer-soft); color: var(--ink); }
+.slot.ro { background: var(--surface-2); color: var(--ink-2); }
+.slot.pad { background: repeating-linear-gradient(135deg, transparent 0 5px, var(--free) 5px 7px); color: var(--ink-3); }
+.slot.span2 { grid-column: span 2; }
+
+/* timelines */
+.timeline td:first-child { font-family: var(--font-mono); color: var(--ink-3); width: 2.5em; }
+.timeline td { width: 45%; }
+.timeline .bad { color: var(--producer); font-weight: 600; }
+.timeline .good { color: var(--consumer); font-weight: 600; }
+.timeline code { white-space: normal; }
+
+/* layout strips for commands */
+.layout { display: grid; gap: 10px; margin: 1.2em 0 1.8em; }
+.layout-row { display: grid; grid-template-columns: minmax(0, 1fr); gap: 4px; }
+.layout-row .label { font-family: var(--font-mono); font-size: 0.75rem; color: var(--ink-3); }
+.bytes { display: flex; gap: 2px; font-family: var(--font-mono); font-size: 0.72rem; min-width: 0; }
+.bytes span { padding: 7px 8px; border-radius: 3px; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+.bytes .hdr { background: var(--producer); color: var(--surface); flex: 0 0 auto; font-weight: 600; }
+.bytes .obj { background: var(--producer-soft); flex: 1 1 0; min-width: 0; }
+.bytes .cnt { background: var(--surface-2); flex: 0 0 auto; }
+.bytes .arr { background: var(--consumer-soft); flex: 2 1 0; min-width: 0; }
+
+/* ---------- charts ---------- */
+.chart { margin: 1.4em 0 2em; padding: 18px 18px 14px; background: var(--surface); border: 1px solid var(--rule); border-radius: 8px; }
+.chart h4 { font-family: var(--font-display); font-weight: 600; font-size: 1rem; margin: 0 0 2px; }
+.chart .sub { font-size: 0.85rem; color: var(--ink-3); margin: 0 0 14px; }
+.bars { display: grid; grid-template-columns: minmax(0, 17em) minmax(0, 1fr); gap: 8px 14px; align-items: center; }
+.bars .name { font-size: 0.88rem; color: var(--ink-2); line-height: 1.3; }
+.bars .track { display: flex; align-items: center; gap: 8px; min-width: 0; }
+.bars .bar { height: 14px; border-radius: 0 4px 4px 0; background: var(--consumer); min-width: 2px; }
+.bars .bar.base { background: var(--skip); }
+.bars .bar.ref { background: var(--producer); }
+.bars .val { font-family: var(--font-mono); font-size: 0.78rem; font-variant-numeric: tabular-nums; color: var(--ink); white-space: nowrap; }
+@media (max-width: 560px) {
+  .bars { grid-template-columns: minmax(0, 1fr); gap: 2px; }
+  .bars .track { margin-bottom: 8px; }
+}
+
+/* ---------- simulator ---------- */
+.sim { margin: 1.6em 0 2em; background: var(--surface); border: 1px solid var(--rule); border-radius: 10px; padding: 18px; }
+.sim-head { display: flex; flex-wrap: wrap; justify-content: space-between; align-items: baseline; gap: 6px 16px; margin-bottom: 14px; }
+.sim-head h4 { font-family: var(--font-display); font-weight: 800; font-size: 1.1rem; margin: 0; }
+.sim-head .cap { font-family: var(--font-mono); font-size: 0.75rem; color: var(--ink-3); }
+.sim-controls { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(240px, 1fr)); margin-bottom: 16px; }
+.sim-group { display: flex; flex-wrap: wrap; gap: 6px; align-items: center; padding: 10px; border-radius: 8px; background: var(--bg); }
+.sim-group .who { font-family: var(--font-mono); font-size: 0.7rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; width: 100%; }
+.sim-group.producer .who { color: var(--producer); }
+.sim-group.consumer .who { color: var(--consumer); }
+.sim-group.misc .who { color: var(--ink-3); }
+.sim button {
+  font-family: var(--font-mono); font-size: 0.76rem; padding: 6px 10px; border-radius: 6px; cursor: pointer;
+  border: 1px solid var(--rule); background: var(--surface); color: var(--ink);
+}
+.sim button:hover:not(:disabled) { border-color: var(--ink-3); }
+.sim button:disabled { opacity: 0.45; cursor: not-allowed; }
+.sim .producer button.main { border-color: var(--producer); color: var(--producer); font-weight: 600; }
+.sim .consumer button.main { border-color: var(--consumer); color: var(--consumer); font-weight: 600; }
+.sim-viz { overflow-x: auto; padding-bottom: 4px; }
+.sim-inner { min-width: 600px; padding-inline: 4px; }
+.lane { position: relative; height: 20px; }
+.lane .lane-name { position: absolute; left: 0; top: 2px; font-family: var(--font-mono); font-size: 0.62rem; color: var(--ink-3); opacity: 0; }
+.pin { position: absolute; top: 0; bottom: 0; width: 0; }
+.pin::before { content: ""; position: absolute; left: -1px; top: 0; bottom: 0; width: 2px; background: currentColor; }
+.pin span { position: absolute; top: 1px; left: 5px; font-family: var(--font-mono); font-size: 0.66rem; font-weight: 600; white-space: nowrap; background: var(--surface); padding: 0 3px; border-radius: 3px; }
+.pin.flip span { left: auto; right: 5px; }
+.pin.p { color: var(--producer); }
+.pin.c { color: var(--consumer); }
+.pin.dim { color: var(--ink-3); }
+.pin.dim::before { background: repeating-linear-gradient(to bottom, currentColor 0 3px, transparent 3px 6px); }
+.cells { display: grid; grid-template-columns: repeat(32, minmax(0, 1fr)); gap: 2px; height: 40px; margin: 3px 0; }
+.cell { position: relative; border-radius: 2px; background: var(--free); font-family: var(--font-mono); font-size: 0.6rem; color: var(--ink); display: flex; align-items: center; justify-content: center; transition: background-color 0.25s; }
+@media (prefers-reduced-motion: reduce) { .cell { transition: none; } }
+.cell.unpublished { background: repeating-linear-gradient(135deg, var(--producer-soft) 0 4px, var(--producer) 4px 6px); }
+.cell.published { background: var(--producer); color: var(--surface); }
+.cell.reading { background: var(--consumer); color: var(--surface); }
+.cell.skip { background: repeating-linear-gradient(135deg, var(--free) 0 4px, var(--skip) 4px 5px); }
+.cell .id { font-weight: 600; text-shadow: none; }
+.cell.unpublished .id { background: var(--surface); color: var(--producer); padding: 0 2px; border-radius: 2px; }
+.scale { display: flex; justify-content: space-between; font-family: var(--font-mono); font-size: 0.62rem; color: var(--ink-3); margin-top: 2px; }
+.legend { display: flex; flex-wrap: wrap; gap: 6px 18px; font-size: 0.82rem; color: var(--ink-2); margin-top: 12px; }
+.legend i { display: inline-block; width: 14px; height: 14px; border-radius: 2px; vertical-align: -2px; margin-right: 6px; }
+.legend .free { background: var(--free); }
+.legend .unpublished { background: repeating-linear-gradient(135deg, var(--producer-soft) 0 3px, var(--producer) 3px 5px); }
+.legend .published { background: var(--producer); }
+.legend .reading { background: var(--consumer); }
+.legend .skip { background: repeating-linear-gradient(135deg, var(--free) 0 3px, var(--skip) 3px 4px); }
+.sim-log {
+  margin: 14px 0 0; padding: 12px 14px; border-radius: 8px; background: var(--bg);
+  font-size: 0.95rem; min-height: 3.4em; border-left: 3px solid var(--rule);
+}
+.sim-log.wait { border-left-color: var(--producer); }
+.sim-log.ok { border-left-color: var(--consumer); }
+.readout { display: grid; grid-template-columns: repeat(auto-fit, minmax(230px, 1fr)); gap: 10px; margin-top: 12px; }
+.readout dl { margin: 0; display: grid; grid-template-columns: auto auto; gap: 2px 12px; font-size: 0.82rem; padding: 10px 12px; border: 1px solid var(--rule); border-radius: 8px; }
+.readout dt { color: var(--ink-2); }
+.readout dd { margin: 0; font-family: var(--font-mono); font-variant-numeric: tabular-nums; text-align: right; }
+.readout .head { grid-column: 1 / -1; font-family: var(--font-mono); font-size: 0.68rem; font-weight: 600; text-transform: uppercase; letter-spacing: 0.08em; }
+.readout .head.p { color: var(--producer); }
+.readout .head.c { color: var(--consumer); }
+
+/* hero svg */
+.hero-fig svg { width: 100%; height: auto; min-width: 560px; display: block; }
+.f-free { fill: var(--free); }
+.f-pub { fill: var(--producer); }
+.f-read { fill: var(--consumer); }
+.f-unpub { fill: url(#hatch-producer); }
+.f-box { fill: var(--surface); stroke: var(--rule); }
+.t-ink { fill: var(--ink); }
+.t-ink2 { fill: var(--ink-2); }
+.t-p { fill: var(--producer); }
+.t-c { fill: var(--consumer); }
+.s-p { stroke: var(--producer); }
+.s-c { stroke: var(--consumer); }
+.s-ink3 { stroke: var(--ink-3); }
+
+footer { margin-top: 72px; padding-top: 24px; border-top: 1px solid var(--rule); font-size: 0.9rem; color: var(--ink-3); }
+</style>
+</head>
+<body>
+<div class="page">
+
+<nav class="toc" aria-label="Steps">
+  <p class="toc-title">Command buffer</p>
+  <ol>
+    <li><a href="#goal"><span class="n">·</span><span>What we are building</span></a></li>
+    <li><a href="#baseline"><span class="n">·</span><span>The obvious version</span></a></li>
+    <li class="sep" aria-hidden="true"></li>
+    <li><a href="#step-1"><span class="n">01</span><span>Bytes, not elements</span></a></li>
+    <li><a href="#step-2"><span class="n">02</span><span>Stream positions</span></a></li>
+    <li><a href="#step-3"><span class="n">03</span><span>Local and shared state</span></a></li>
+    <li><a href="#step-4"><span class="n">04</span><span>The fast path</span></a></li>
+    <li><a href="#step-5"><span class="n">05</span><span>Alignment</span></a></li>
+    <li><a href="#step-6"><span class="n">06</span><span>Wrapping around</span></a></li>
+    <li><a href="#memory-order"><span class="n">·</span><span>Memory ordering</span></a></li>
+    <li><a href="#step-7"><span class="n">07</span><span>Publishing</span></a></li>
+    <li><a href="#step-8"><span class="n">08</span><span>The slow path</span></a></li>
+    <li><a href="#step-9"><span class="n">09</span><span>Sleeping safely</span></a></li>
+    <li><a href="#step-10"><span class="n">10</span><span>Spin, then sleep</span></a></li>
+    <li><a href="#step-11"><span class="n">11</span><span>Releasing lazily</span></a></li>
+    <li><a href="#step-12"><span class="n">12</span><span>Commands</span></a></li>
+    <li><a href="#step-13"><span class="n">13</span><span>A render loop</span></a></li>
+    <li class="sep" aria-hidden="true"></li>
+    <li><a href="#tests"><span class="n">·</span><span>Testing</span></a></li>
+    <li><a href="#numbers"><span class="n">·</span><span>Measurements</span></a></li>
+    <li><a href="#rules"><span class="n">·</span><span>The contract</span></a></li>
+    <li><a href="#next"><span class="n">·</span><span>Going further</span></a></li>
+    <li><a href="#refs"><span class="n">·</span><span>References</span></a></li>
+  </ol>
+</nav>
+
+<main class="prose">
+
+<header class="hero" id="top">
+  <p class="eyebrow">C++20 · single producer, single consumer</p>
+  <h1>A command buffer for two&nbsp;threads</h1>
+  <p class="lede">One thread records commands and another executes them, in order. A command is a type and a plain-data payload in one ring of bytes, and the executing thread decodes it with a <code>switch</code>. Recording a command allocates nothing and takes no lock, and a thread with nothing to do sleeps instead of spinning. This guide builds the whole thing one decision at a time, following Kaspar Daugaard's three articles on SPSC ring buffers. Every snippet is taken from the working code in this guide's repository.</p>
+  <div class="meta">
+    <span>include/cb/SpscRingBuffer.h</span>
+    <span>include/cb/CommandBuffer.h</span>
+    <span>23 tests</span>
+    <span>measured on a Ryzen 7 9700X</span>
+  </div>
+
+  <details class="contents-mobile">
+    <summary>Contents</summary>
+    <ol>
+      <li><a href="#goal">What we are building</a></li>
+      <li><a href="#baseline">The obvious version</a></li>
+      <li><a href="#step-1">Step 1: Bytes, not elements</a></li>
+      <li><a href="#step-2">Step 2: Stream positions</a></li>
+      <li><a href="#step-3">Step 3: Local and shared state</a></li>
+      <li><a href="#step-4">Step 4: The fast path</a></li>
+      <li><a href="#step-5">Step 5: Alignment</a></li>
+      <li><a href="#step-6">Step 6: Wrapping around</a></li>
+      <li><a href="#memory-order">Background: Memory ordering</a></li>
+      <li><a href="#step-7">Step 7: Publishing</a></li>
+      <li><a href="#step-8">Step 8: The slow path</a></li>
+      <li><a href="#step-9">Step 9: Sleeping safely</a></li>
+      <li><a href="#step-10">Step 10: Spin, then sleep</a></li>
+      <li><a href="#step-11">Step 11: Releasing lazily</a></li>
+      <li><a href="#step-12">Step 12: Commands</a></li>
+      <li><a href="#step-13">Step 13: A render loop</a></li>
+      <li><a href="#tests">Testing</a></li>
+      <li><a href="#numbers">Measurements</a></li>
+      <li><a href="#rules">The contract</a></li>
+      <li><a href="#next">Going further</a></li>
+      <li><a href="#refs">References</a></li>
+    </ol>
+  </details>
+
+  <figure class="hero-fig">
+    <div class="diagram-wrap">
+    <svg viewBox="0 0 760 236" role="img" aria-label="The game thread writes commands at the right end of the used region of a ring of bytes and publishes them; the render thread reads them from the middle and releases what it has finished.">
+      <defs>
+        <pattern id="hatch-producer" width="6" height="6" patternUnits="userSpaceOnUse" patternTransform="rotate(45)">
+          <rect width="6" height="6" style="fill: var(--producer-soft)"/>
+          <rect width="2" height="6" style="fill: var(--producer)"/>
+        </pattern>
+        <marker id="arrow-p" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" style="fill: var(--producer)"/>
+        </marker>
+        <marker id="arrow-c" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" style="fill: var(--consumer)"/>
+        </marker>
+      </defs>
+      <!-- producer callout -->
+      <rect class="f-box" x="430" y="6" width="320" height="56" rx="7"/>
+      <text class="t-p" x="446" y="28" font-size="12" font-weight="600">GAME THREAD · PRODUCER</text>
+      <text class="t-ink2" x="446" y="48" font-size="12">Draw() writes here, Submit() publishes</text>
+      <line class="s-p" x1="605" y1="62" x2="605" y2="88" stroke-width="2" marker-end="url(#arrow-p)"/>
+      <!-- strip: 32 cells of 22.5 px from x=20 -->
+      <g id="hero-cells"></g>
+      <!-- position labels -->
+      <text class="t-p" x="515" y="84" font-size="11" text-anchor="middle">published</text>
+      <line class="s-p" x1="515" y1="88" x2="515" y2="140" stroke-width="1.5"/>
+      <line class="s-c" x1="155" y1="90" x2="155" y2="142" stroke-width="1.5"/>
+      <text class="t-c" x="155" y="156" font-size="11" text-anchor="middle">released</text>
+      <!-- consumer callout -->
+      <line class="s-c" x1="290" y1="168" x2="290" y2="142" stroke-width="2" marker-end="url(#arrow-c)"/>
+      <rect class="f-box" x="20" y="170" width="330" height="56" rx="7"/>
+      <text class="t-c" x="36" y="192" font-size="12" font-weight="600">RENDER THREAD · CONSUMER</text>
+      <text class="t-ink2" x="36" y="212" font-size="12">switch (type) reads here, then releases</text>
+      <text class="t-ink2" x="740" y="156" font-size="11" text-anchor="end">free again →</text>
+    </svg>
+    </div>
+    <figcaption>One moment in the ring. Orange bytes are published commands waiting to run; the striped ones are still being written and the consumer cannot see them yet. Teal bytes have been read but not released, so the producer must not overwrite them. Everything else is free.</figcaption>
+  </figure>
+</header>
+
+<section id="goal">
+  <p class="eyebrow">Goal</p>
+  <h2>What we are building</h2>
+  <p>A render thread is the classic case. The game thread decides what to draw; the render thread talks to the graphics API. The game thread should not stall on the graphics driver, and the render thread should not see game state halfway through an update. So the game thread writes a list of self-contained commands and the render thread replays them. This is where we will end up. On the game thread:</p>
+  <div class="codeblock"><div class="file"><b>examples/RenderThreadExample.cpp</b><span>simplified</span></div>
+<pre><code class="language-cpp">RenderCommandBuffer commands(256 * 1024);  // capacity in bytes
+Renderer renderer;                          // from here on, only touched by the render thread
+std::thread renderThread(&amp;RenderCommandBuffer::ExecuteUntilStopped, &amp;commands, std::ref(renderer));
+
+for (int frame = 0; frame &lt; frameCount; ++frame)
+{
+    commands.SetClearColor(Color{pulse, 0.2f, 0.3f});   // writes kCmd_SetClearColor, then the color
+    for (const Object&amp; object : objects)
+        commands.Draw(object.mesh, object.transform);   // writes kCmd_Draw, then mesh and transform
+    commands.Present(frame);
+    commands.Submit();                                  // the render thread may start on this frame
+}
+
+commands.SubmitStop();
+renderThread.join();</code></pre></div>
+  <p>And on the render thread, which waits until a command is ready, reads its type and payload, and executes it:</p>
+  <div class="codeblock"><div class="file"><b>examples/RenderThreadExample.cpp</b><span>RenderCommandBuffer, abridged</span></div>
+<pre><code class="language-cpp">void ExecuteUntilStopped(Renderer&amp; renderer)
+{
+    cb::CommandType type;
+    while (ReadCommand(type))                           // waits for the next command; false after SubmitStop()
+    {
+        switch (type)
+        {
+            case kCmd_SetClearColor:
+            {
+                renderer.SetClearColor(ReadPayload&lt;Color&gt;());
+                break;
+            }
+
+            case kCmd_Draw:
+            {
+                const DrawPayload&amp; payload = ReadPayload&lt;DrawPayload&gt;();
+                renderer.Draw(payload.mesh, payload.transform);
+                break;
+            }
+
+            case kCmd_Present:
+            {
+                renderer.Present(ReadPayload&lt;int&gt;());
+                break;
+            }
+        }
+        FinishCommand();
+    }
+}</code></pre></div>
+  <p>The requirements behind that interface:</p>
+  <ul>
+    <li><strong>Commands differ in size.</strong> Setting a clear color takes a few bytes; uploading a mesh carries kilobytes of vertex data.</li>
+    <li><strong>Recording must be cheap.</strong> A frame can have thousands of commands, so there can be no heap allocation and no lock per command.</li>
+    <li><strong>One writer, one reader.</strong> This restriction is what keeps the lock-free design simple. If several threads record, each gets its own buffer.</li>
+    <li><strong>Idle threads sleep.</strong> A render thread with nothing to render must not burn a core, and waking it must cost the game thread nothing in the common case.</li>
+    <li><strong>The producer can wait for the consumer.</strong> For example, to keep at most two frames in flight.</li>
+  </ul>
+  <p>The code has three layers. <code>SpscRingBuffer</code> moves bytes from one thread to the other. <code>CommandBuffer</code> writes and reads command types and payloads in those bytes, and handles batches, waiting and stopping. Your own class, <code>RenderCommandBuffer</code> here, defines the commands: one producer function and one <code>case</code> each. Steps 1 to 11 build the ring buffer, step 12 the commands.</p>
+</section>
+
+<section id="baseline">
+  <p class="eyebrow">Starting point</p>
+  <h2>The obvious version</h2>
+  <p>Most people start with a mutex, a condition variable and a queue of fixed-size command structs:</p>
+  <div class="codeblock"><div class="file"><b>bench/Benchmark.cpp</b><span>the baseline</span></div>
+<pre><code class="language-cpp">struct QueuedCommand
+{
+    cb::CommandType type;
+    std::uint64_t value;
+};
+
+struct MutexQueue
+{
+    std::mutex mutex;
+    std::condition_variable notEmpty;
+    std::deque&lt;QueuedCommand&gt; queue;
+
+    void Push(const QueuedCommand&amp; command)   // game thread
+    {
+        {
+            std::lock_guard lock(mutex);
+            queue.push_back(command);
+        }
+        notEmpty.notify_one();
+    }
+
+    QueuedCommand Pop()                        // render thread
+    {
+        std::unique_lock lock(mutex);
+        while (queue.empty())
+            notEmpty.wait(lock);
+        QueuedCommand command = queue.front();
+        queue.pop_front();
+        return command;
+    }
+};</code></pre></div>
+  <p>The render thread pops commands in a loop and switches on <code>command.type</code>. It is correct, and for a few hundred commands per frame it is fine. Its costs grow with the command count:</p>
+  <ul>
+    <li>Both threads take the same mutex and touch the same deque for every command, so the cache lines holding them move back and forth between two cores.</li>
+    <li>Every command is as large as the largest one. A command with variable-size data, such as a mesh upload with its vertices, has to allocate that data somewhere else and carry a pointer. <code>std::deque</code> also allocates a new block every few elements.</li>
+    <li><code>notify_one()</code> calls into the OS wait machinery for every command.</li>
+  </ul>
+  <p>On the test machine it moves 20 million commands at <strong>47 ns</strong> each. The finished command buffer runs the same benchmark at <strong>3.1 to 3.5 ns</strong> per command when the producer submits in batches. The <a href="#numbers">measurements</a> section has the details.</p>
+</section>
+
+<section id="step-1">
+  <p class="eyebrow">Step 1 <span class="of">of 13</span></p>
+  <h2>Bytes, not elements</h2>
+  <p>Most lock-free queues are an array of one element type: slot <em>i</em> holds item <em>i</em>. Commands have different sizes, and a fixed slot size either wastes memory or needs a pointer to somewhere else, which brings allocation back. So this ring holds raw bytes, and each side asks for exactly as many as it needs.</p>
+  <p>The second decision is to separate <em>reserving</em> space from <em>making it visible</em>. The producer can reserve and fill many pieces and then hand all of them over at once. The consumer can read many pieces and give their space back at once:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b><span>the core API</span></div>
+<pre><code class="language-cpp">// Producer
+void* PrepareWrite(std::size_t size, std::size_t alignment); // reserve bytes to fill in
+void  FinishWrite();                                         // publish everything written so far
+
+// Consumer
+void* PrepareRead(std::size_t size, std::size_t alignment);  // the next bytes, same size as written
+void  FinishRead();                                          // release everything read so far</code></pre></div>
+  <p>Typed helpers sit on top. <code>Write</code> and <code>WriteArray</code> copy plain data; <code>Emplace</code> constructs an object in place; <code>Read</code> returns a reference into the ring, so the consumer uses the data where it lies:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b></div>
+<pre><code class="language-cpp">template &lt;class T&gt;
+void Write(const T&amp; value)
+{
+    static_assert(std::is_trivially_copyable_v&lt;T&gt;, "Write() copies bytes; use Emplace() for other types");
+    std::memcpy(PrepareWrite(sizeof(T), alignof(T)), &amp;value, sizeof(T));
+}
+
+template &lt;class T, class... Args&gt;
+T&amp; Emplace(Args&amp;&amp;... args)
+{
+    return *::new (PrepareWrite(sizeof(T), alignof(T))) T(std::forward&lt;Args&gt;(args)...);
+}
+
+template &lt;class T&gt;
+T&amp; Read()
+{
+    return *std::launder(static_cast&lt;T*&gt;(PrepareRead(sizeof(T), alignof(T))));
+}</code></pre></div>
+  <p>Used directly, the ring buffer already works as a command buffer: write a command type, then its data, and switch on the type when reading. This is how Daugaard's article presents it, and it is the shape the command layer in <a href="#step-12">step 12</a> builds on:</p>
+  <div class="codeblock"><div class="file"><b>raw ring buffer</b><span>illustration</span></div>
+<pre><code class="language-cpp">// Producer
+ring.Write(kCmd_CreateMesh);
+ring.Write(meshId);
+ring.Write(vertexCount);
+ring.WriteArray(vertices, vertexCount);
+ring.FinishWrite();                       // now the consumer can see all four pieces
+
+// Consumer
+switch (ring.Read&lt;CommandType&gt;())
+{
+    case kCmd_CreateMesh:
+    {
+        int meshId = ring.Read&lt;int&gt;();
+        std::uint32_t count = ring.Read&lt;std::uint32_t&gt;();
+        const float* vertices = ring.ReadArray&lt;float&gt;(count);   // used in place, no copy
+        renderer.CreateMesh(meshId, vertices, count);
+        break;
+    }
+}
+ring.FinishRead();                        // the producer may reuse those bytes</code></pre></div>
+  <p>Reading in place is fast, and it comes with one rule that everything else depends on:</p>
+  <div class="rule"><span class="tag">Rule 1</span><p>The consumer reads the same sizes, with the same alignments, in the same order as the producer wrote them. Writing two 4-byte values and reading one 8-byte value is a bug even though the bytes are identical. <a href="#step-6">Step 6</a> shows why.</p></div>
+</section>
+
+<section id="step-2">
+  <p class="eyebrow">Step 2 <span class="of">of 13</span></p>
+  <h2>Stream positions instead of indices</h2>
+  <p>Each side needs to know how far it has got. The usual approach stores an index into the array and wraps it with a modulo or a mask. Then "read index equals write index" means empty, and to tell a full buffer from an empty one you either waste a slot or keep a separate count.</p>
+  <p>Daugaard's version counts differently. Think of every byte ever written as one endless stream. A <em>stream position</em> is an offset into that stream: it only grows and is never wrapped. Each thread stores its position in two parts:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b><span>LocalState, abridged</span></div>
+<pre><code class="language-cpp">std::size_t base; // stream position of buffer[0] in the current lap: 0, capacity, 2 * capacity, ...
+std::size_t pos;  // offset inside the buffer, 0 &lt;= pos &lt;= capacity
+                  // stream position = base + pos</code></pre></div>
+  <p>The thread works with the small offset <code>pos</code> on its fast path, and shares the full stream position with the other thread. Comparing stream positions answers every question directly:</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Question</th><th>Test on stream positions</th></tr></thead>
+    <tbody>
+      <tr><td>Is the buffer empty?</td><td><code>published == released</code></td></tr>
+      <tr><td>Is it full?</td><td><code>written − released == capacity</code></td></tr>
+      <tr><td>May the producer write up to stream position <code>e</code>?</td><td><code>e ≤ released + capacity</code></td></tr>
+      <tr><td>May the consumer read up to <code>e</code>?</td><td><code>e ≤ published</code></td></tr>
+    </tbody>
+  </table></div>
+  <p>No slot is wasted and nothing is masked. The original code asks for a power-of-two capacity; with this scheme nothing depends on that, so this version accepts any size.</p>
+  <p>Positions are <code>size_t</code> and keep growing, so they will eventually wrap past zero. On a 64-bit build that takes centuries; on a 32-bit build it is 4 GB, a few seconds of heavy traffic. It is harmless either way, because the code never compares two positions with <code>&lt;</code>. It subtracts them and looks at the sign:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b></div>
+<pre><code class="language-cpp">// `to - from` as a signed number. Stream positions only move forward and the two sides
+// stay within two laps of each other, so this is right even after size_t wraps to 0.
+static std::ptrdiff_t Distance(std::size_t from, std::size_t to)
+{
+    return static_cast&lt;std::ptrdiff_t&gt;(to - from);
+}</code></pre></div>
+  <p>The true difference between the two threads' positions is always small, and unsigned subtraction followed by a signed cast recovers it even when one value has wrapped and the other has not.</p>
+  <div class="evidence"><span class="tag">Tested</span><code>RingBuffer_TwoThreads_PositionOverflow</code> starts the stream 50,000 bytes below <code>SIZE_MAX</code> and streams half a million records across the wrap. With <code>Distance()</code> replaced by a plain comparison, the test hangs.</div>
+</section>
+
+<section id="step-3">
+  <p class="eyebrow">Step 3 <span class="of">of 13</span></p>
+  <h2>Local state, shared state, and cache lines</h2>
+  <p>Caches move memory in 64-byte lines. To write to a line, a core must own it exclusively, so a write on one core invalidates every other core's copy, and the next access on those cores waits for the line to come back. This happens even when two threads write <em>different</em> variables that merely share a line, which is called false sharing. A small benchmark in this repository shows the effect: two threads, each incrementing only its own counter.</p>
+  <div class="chart" role="img" aria-label="False sharing benchmark: 0.81 ns per increment with both counters in one cache line, 0.19 ns with the counters 64 bytes apart.">
+    <h4>Two threads, each incrementing its own counter</h4>
+    <p class="sub">nanoseconds per increment, median of 5 runs · shorter is faster</p>
+    <div class="bars">
+      <span class="name">counters in the same cache line</span>
+      <span class="track" title="0.81 ns per increment (1241 M/s)"><span class="bar base" style="width: 100%"></span><span class="val">0.81 ns</span></span>
+      <span class="name">counters 64 bytes apart</span>
+      <span class="track" title="0.19 ns per increment (5304 M/s)"><span class="bar" style="width: 23.5%"></span><span class="val">0.19 ns</span></span>
+    </div>
+  </div>
+  <p>Daugaard measured the same effect on his ring buffer. Moving one billion ints with a release after every item took 36.0 s with the reader's and writer's state packed together, and 1.7 s with each in its own cache line: a factor of 21 from layout alone.</p>
+  <p>So the state is split by which thread writes it, and each group gets its own line:</p>
+  <div class="table-wrap"><table class="memmap">
+    <thead><tr><th>Offset</th><th>Member</th><th style="width: 52%">Contents, 8 bytes per slot</th><th>Written by</th><th>Read by</th></tr></thead>
+    <tbody>
+      <tr><td class="off">+0</td><td><code>m_Storage</code>, <code>m_SpinCount</code></td><td><div class="slots"><span class="slot ro">storage</span><span class="slot ro">spins</span><span class="slot pad span2"></span><span class="slot pad span2"></span><span class="slot pad span2"></span></div></td><td>nobody</td><td>both</td></tr>
+      <tr><td class="off">+64</td><td><code>m_Writer</code></td><td><div class="slots"><span class="slot p">buffer</span><span class="slot p">pos</span><span class="slot p">end</span><span class="slot p">base</span><span class="slot p">size</span><span class="slot pad span2"></span><span class="slot pad"></span></div></td><td class="who-p">producer</td><td class="who-p">producer</td></tr>
+      <tr><td class="off">+128</td><td><code>m_Reader</code></td><td><div class="slots"><span class="slot c">buffer</span><span class="slot c">pos</span><span class="slot c">end</span><span class="slot c">base</span><span class="slot c">size</span><span class="slot c">finished</span><span class="slot c">published</span><span class="slot c">lazyLimit</span></div></td><td class="who-c">consumer</td><td class="who-c">consumer</td></tr>
+      <tr><td class="off">+192</td><td><code>m_WriterShared</code></td><td><div class="slots"><span class="slot p">pos</span><span class="slot p">waiting</span><span class="slot pad span2"></span><span class="slot pad span2"></span><span class="slot pad span2"></span></div></td><td class="who-p">producer</td><td class="who-c">consumer</td></tr>
+      <tr><td class="off">+256</td><td><code>m_ReaderShared</code></td><td><div class="slots"><span class="slot c">pos</span><span class="slot c">waiting</span><span class="slot pad span2"></span><span class="slot pad span2"></span><span class="slot pad span2"></span></div></td><td class="who-c">consumer</td><td class="who-p">producer</td></tr>
+      <tr><td class="off">+320</td><td><code>m_ReaderWakeup</code></td><td><div class="slots"><span class="slot ro">semaphore</span><span class="slot pad span2"></span><span class="slot pad span2"></span><span class="slot pad span2"></span><span class="slot pad"></span></div></td><td colspan="2">only when a thread sleeps or wakes</td></tr>
+      <tr><td class="off">+384</td><td><code>m_WriterWakeup</code></td><td><div class="slots"><span class="slot ro">semaphore</span><span class="slot pad span2"></span><span class="slot pad span2"></span><span class="slot pad span2"></span><span class="slot pad"></span></div></td><td colspan="2">only when a thread sleeps or wakes</td></tr>
+    </tbody>
+  </table></div>
+  <p>Each <code>LocalState</code> holds everything its thread needs on the fast path. The buffer pointer and capacity are stored twice, once per side, so the producer never reads a line the consumer writes. The two <code>SharedState</code> lines hold the one number the other thread needs: the published position.</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b></div>
+<pre><code class="language-cpp">// State only one thread ever touches. It stays in that core's cache.
+struct alignas(kCacheLineSize) LocalState
+{
+    char*       buffer = nullptr;
+    std::size_t pos  = 0; // offset of the next byte to write or read, in [0, size]
+    std::size_t end  = 0; // [pos, end) is known to be usable without looking at the other thread
+    std::size_t base = 0; // stream position of buffer[0] in the current lap (grows by `size` per lap)
+    std::size_t size = 0; // capacity; duplicated in both states so neither side reads the other's line
+    // Consumer only, for FinishReadLazy() (step 11):
+    std::size_t finished  = 0;
+    std::size_t published = 0;
+    std::size_t lazyLimit = 0;
+};
+
+// State one thread writes and the other reads: one cache line per writer.
+struct alignas(kCacheLineSize) SharedState
+{
+    std::atomic&lt;std::size_t&gt; pos{0};      // stream position published by the owning thread
+    std::atomic&lt;bool&gt; peerWaiting{false}; // the other thread sleeps until `pos` changes (step 9)
+};
+
+LocalState  m_Writer;       // producer only
+LocalState  m_Reader;       // consumer only
+SharedState m_WriterShared; // written by the producer, read by the consumer
+SharedState m_ReaderShared; // written by the consumer, read by the producer</code></pre></div>
+  <p>The field that makes this layout pay off is <code>end</code>, a cached limit. <code>[pos, end)</code> is a range the thread already knows it may use: free space for the producer, published data for the consumer. As long as an allocation stays below <code>end</code>, the thread touches only its own cache line. Only when it runs past <code>end</code> does it load the other thread's position and recompute <code>end</code>. The starting values describe an empty buffer:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b><span>constructor</span></div>
+<pre><code class="language-cpp">m_Writer.end = capacity; // empty buffer: the producer may fill all of it...
+m_Reader.end = 0;        // ...and the consumer has nothing to read yet</code></pre></div>
+</section>
+
+<section id="step-4">
+  <p class="eyebrow">Step 4 <span class="of">of 13</span></p>
+  <h2>The fast path</h2>
+  <p>With the cached limit in place, reserving space is a handful of instructions:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b></div>
+<pre><code class="language-cpp">CB_FORCE_INLINE void* PrepareWrite(std::size_t size, std::size_t alignment)
+{
+    std::size_t pos = AlignUp(m_Writer.pos, alignment);
+    std::size_t end = pos + size;
+    if (end &gt; m_Writer.end) [[unlikely]]
+        WriteSlowPath(pos, end);
+    m_Writer.pos = end;
+    return m_Writer.buffer + pos;
+}
+
+CB_FORCE_INLINE void* PrepareRead(std::size_t size, std::size_t alignment)
+{
+    std::size_t pos = AlignUp(m_Reader.pos, alignment);
+    std::size_t end = pos + size;
+    if (end &gt; m_Reader.end) [[unlikely]]
+        ReadSlowPath(pos, end);
+    m_Reader.pos = end;
+    return m_Reader.buffer + pos;
+}</code></pre></div>
+  <p>Align, add, compare, store. The comparison with the cached <code>end</code> is the only branch. Everything else (wrapping, refreshing <code>end</code>, waiting) lives in <code>WriteSlowPath()</code> and <code>ReadSlowPath()</code>, which are marked <code>CB_NOINLINE</code>. The fast path is marked <code>CB_FORCE_INLINE</code> so the compiler inlines it into every <code>Write()</code> and every recorded command; because it is tiny, that does not bloat the code.</p>
+  <p>Inlining matters more than it looks. In Daugaard's comparison, <code>boost::lockfree::spsc_queue</code> took 42 s for a billion ints at <code>-Os</code> and 12 s at <code>-Ofast</code>, against 1.2 s for his buffer, and he attributes much of the gap to poor inlining.</p>
+  <p class="note">The two slow paths are both new <em>and</em> mirror images of each other. Both start the same way: if the block does not fit before the end of the buffer, wrap. Step 6 covers that part; step 8 covers the rest.</p>
+</section>
+
+<section id="step-5">
+  <p class="eyebrow">Step 5 <span class="of">of 13</span></p>
+  <h2>Alignment</h2>
+  <p>Commands hold doubles, pointers and SIMD types, so each allocation rounds the position up to its alignment first:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b></div>
+<pre><code class="language-cpp">static std::size_t AlignUp(std::size_t pos, std::size_t alignment)
+{
+    assert(alignment != 0 &amp;&amp; (alignment &amp; (alignment - 1)) == 0 &amp;&amp; alignment &lt;= kCacheLineSize);
+    return (pos + alignment - 1) &amp; ~(alignment - 1);
+}</code></pre></div>
+  <p>The offset is aligned relative to the start of the storage, so the storage itself must be aligned at least as strictly. The constructor allocates it with <code>::operator new(capacity, std::align_val_t{64})</code>, which supports any alignment up to 64 bytes. A type declared <code>alignas(128)</code> trips the assert.</p>
+  <p>When the alignment is a compile-time constant and the compiler can see the previous write, which is usual once <code>PrepareWrite()</code> is inlined, the rounding often folds away. The article lists two alternatives for code where it does not: ignore alignment entirely if every type is fine with the buffer's natural alignment, or round every size up to a common minimum so <code>pos</code> is always aligned already.</p>
+  <p>Rule 1 covers alignment too. If the producer aligns a block to 16 and the consumer asks for 8, the consumer starts reading inside the padding.</p>
+  <div class="evidence"><span class="tag">Tested</span><code>RingBuffer_Alignment</code> writes blocks with alignments 1, 32, 2 and 64, checks that they land at offsets 0, 32, 64 and 128, and that the consumer gets back the very same addresses.</div>
+</section>
+
+<section id="step-6">
+  <p class="eyebrow">Step 6 <span class="of">of 13</span></p>
+  <h2>Wrapping around with a gap</h2>
+  <p>A block must be contiguous: the consumer gets one pointer and uses the bytes in place, so a block cannot start at the end of the buffer and continue at the beginning. When the next block does not fit before the physical end, the producer leaves the rest of the lap empty and puts the block at offset 0 of the next lap:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b><span>WriteSlowPath(), first part</span></div>
+<pre><code class="language-cpp">std::size_t base = m_Writer.base;
+if (end &gt; m_Writer.size)
+{
+    // The block does not fit before the physical end of the buffer. Leave the rest of
+    // this lap as a gap and start the block at offset 0 of the next lap. The consumer
+    // makes the same decision on its own, because it reads the same sizes.
+    end -= pos;
+    pos = 0;
+    base += m_Writer.size;
+}</code></pre></div>
+  <p>The producer writes no marker into the gap. The consumer reaches the same conclusion from the same arithmetic: it aligns its position, adds the size, sees that the end passes the capacity, and skips to the next lap. That is the reason for rule 1. If the consumer read two 4-byte values as one 8-byte value near the end of the buffer, the two sides would make different wrap decisions, and every byte after that would be misread.</p>
+  <p>The alternative is a "magic ring buffer" that maps the same physical memory twice in a row, so a block can run off the end and continue at the start. It needs OS-specific virtual memory calls and page-sized buffers. A gap wastes less than one block per lap, which is a small price for portable code.</p>
+
+  <div class="sim" id="sim">
+    <div class="sim-head">
+      <h4>Ring buffer simulator</h4>
+      <span class="cap">capacity 256 bytes · one cell = 8 bytes</span>
+    </div>
+    <div class="sim-controls">
+      <div class="sim-group producer">
+        <span class="who">Producer</span>
+        <button type="button" id="sim-w24" data-size="24" data-align="8">Write 24 B</button>
+        <button type="button" id="sim-w40" data-size="40" data-align="8">Write 40 B</button>
+        <button type="button" id="sim-w64" data-size="64" data-align="8">Write 64 B</button>
+        <button type="button" id="sim-w96" data-size="96" data-align="8">Write 96 B</button>
+        <button type="button" id="sim-w16a" data-size="16" data-align="32">Write 16 B, align 32</button>
+        <button type="button" id="sim-fw" class="main">FinishWrite()</button>
+      </div>
+      <div class="sim-group consumer">
+        <span class="who">Consumer</span>
+        <button type="button" id="sim-r" class="main">Read next block</button>
+        <button type="button" id="sim-fr" class="main">FinishRead()</button>
+      </div>
+      <div class="sim-group misc">
+        <span class="who">Simulator</span>
+        <button type="button" id="sim-play">Play: a wrap-around</button>
+        <button type="button" id="sim-reset">Reset</button>
+      </div>
+    </div>
+    <div class="sim-viz">
+      <div class="sim-inner">
+        <div class="lane" id="lane-wend"></div>
+        <div class="lane" id="lane-pub"></div>
+        <div class="lane" id="lane-w"></div>
+        <div class="cells" id="sim-cells" role="img" aria-label="Ring buffer cells"></div>
+        <div class="lane" id="lane-r"></div>
+        <div class="lane" id="lane-rel"></div>
+        <div class="lane" id="lane-rend"></div>
+        <div class="scale"><span>0</span><span>64</span><span>128</span><span>192</span><span>256</span></div>
+      </div>
+    </div>
+    <div class="legend">
+      <span><i class="free"></i>free</span>
+      <span><i class="unpublished"></i>written, not published</span>
+      <span><i class="published"></i>published, not read</span>
+      <span><i class="reading"></i>read, not released</span>
+      <span><i class="skip"></i>gap or padding</span>
+    </div>
+    <p class="sim-log" id="sim-log" aria-live="polite">Press <strong>Play</strong> to step through a wrap-around, or drive both threads yourself. Each button runs the real algorithm, ported to JavaScript and run on one thread, so an operation that would block stops and explains what it would wait for.</p>
+    <div class="readout" id="sim-readout"></div>
+  </div>
+  <p>Things to try in the simulator: fill the buffer until the producer has to wait; read a block that has been written but not published; and write 16 bytes with 32-byte alignment to see the padding. The dashed pins are the cached <code>end</code> values. They only move when a thread takes its slow path, which is the point of step 3.</p>
+  <div class="evidence"><span class="tag">Tested</span><code>RingBuffer_WrapAroundLeavesGap</code> checks the exact addresses on both sides of a wrap. When the consumer's wrap test is changed from <code>&gt;</code> to <code>&gt;=</code>, the two-thread stress test fails on its first wrap with an out-of-sequence record.</div>
+</section>
+
+<section id="memory-order">
+  <p class="eyebrow">Background</p>
+  <h2>Memory ordering</h2>
+  <p>Steps 7 to 11 depend on four memory orders: <code>relaxed</code>, <code>acquire</code>, <code>release</code> and <code>seq_cst</code>. This section explains the problem they solve, what each one guarantees, what it costs, and where this code uses it. If you know all that already, skip to <a href="#step-7">step 7</a>.</p>
+
+  <h3>Why the order of memory operations is not a given</h3>
+  <p>The producer's code says: write the command bytes, then store the new position. The consumer relies on seeing them in that order. Three things can change the order in which another thread observes them:</p>
+  <ul>
+    <li><strong>The compiler</strong> may reorder, merge or remove loads and stores, as long as a single thread could not tell the difference. It may also keep a variable in a register: a loop like <code>while (!ready) {}</code> on a plain <code>bool</code> can become a loop that never reads memory again.</li>
+    <li><strong>The CPU</strong> executes instructions out of order. A store first goes into the core's <em>store buffer</em> and reaches the cache, where other cores can see it, a little later. Meanwhile the core keeps running, including the loads that come after the store.</li>
+    <li><strong>Weakly ordered CPUs</strong> such as ARM may also make two stores, or two loads, to different addresses visible in the opposite order.</li>
+  </ul>
+  <p>One thing is always guaranteed: <em>coherence</em>. For any single memory location, all cores agree on one order of the writes to it. The trouble is always about the order of accesses to <em>different</em> locations, such as the command bytes and the position. Which reorderings the hardware itself performs, for ordinary loads and stores to different addresses:</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>An access, then a later access to another address</th><th>Can appear swapped on x86-64</th><th>on ARMv8</th></tr></thead>
+    <tbody>
+      <tr><td>store, then store</td><td class="no">no</td><td class="yes">yes</td></tr>
+      <tr><td>load, then load</td><td class="no">no</td><td class="yes">yes</td></tr>
+      <tr><td>load, then store</td><td class="no">no</td><td class="yes">yes</td></tr>
+      <tr><td>store, then load (the store buffer)</td><td class="yes">yes</td><td class="yes">yes</td></tr>
+    </tbody>
+  </table></div>
+  <p>The compiler may perform any of the four on either CPU. C++ therefore handles this in the language. If two threads access the same ordinary variable, at least one of them writes, and nothing orders the accesses, that is a <em>data race</em>, and the whole program has undefined behavior. <code>std::atomic</code> is the way out: an atomic operation is never torn and never races. Its <code>std::memory_order</code> argument says how it orders the <em>other</em> memory accesses around it, ordinary ones included.</p>
+
+  <h3>Two patterns, two different answers</h3>
+  <p>Two small "litmus tests" capture almost everything this code needs. The first is <strong>message passing</strong>: one thread writes data and then sets a flag; the other sees the flag and reads the data.</p>
+  <div class="pair">
+    <div class="codeblock"><div class="file"><b>producer</b></div>
+<pre><code class="language-cpp">data = 42; // an ordinary int
+ready.store(true, std::memory_order_release);</code></pre></div>
+    <div class="codeblock"><div class="file"><b>consumer</b></div>
+<pre><code class="language-cpp">if (ready.load(std::memory_order_acquire))
+    Use(data); // sees 42</code></pre></div>
+  </div>
+  <p>Release and acquire are exactly enough here. If the acquire load sees <code>true</code>, the consumer is guaranteed to see 42, on any CPU, whatever the compiler does. With relaxed instead, it might see the old value of <code>data</code>, and since <code>data</code> is an ordinary variable the program would have a data race. Publishing a position in step 7 is this pattern.</p>
+  <p>The second is <strong>store buffering</strong>: each thread stores to its own variable, then loads the other thread's.</p>
+  <div class="pair">
+    <div class="codeblock"><div class="file"><b>thread A</b></div>
+<pre><code class="language-cpp">x.store(1, order);
+r1 = y.load(order);</code></pre></div>
+    <div class="codeblock"><div class="file"><b>thread B</b></div>
+<pre><code class="language-cpp">y.store(1, order);
+r2 = x.load(order);</code></pre></div>
+  </div>
+  <p>Can both loads return 0? If each store were visible before the next load ran, no: whichever load runs last must see the other thread's store. But with release and acquire, yes. Both stores can still sit in their store buffers while both loads read the old values from the cache. Only <code>seq_cst</code> rules this out. The sleep handshake in step 9 is this pattern: "store my position, then check whether you are asleep" against "store that I am asleep, then check your position". If both checks read the old value, both threads sleep forever.</p>
+  <p><code>examples/StoreBufferingLitmus.cpp</code> runs this test a million times for each choice of order and counts how often both loads returned 0. Three runs on the Ryzen 7 9700X:</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Orders used</th><th class="num">run 1</th><th class="num">run 2</th><th class="num">run 3</th></tr></thead>
+    <tbody>
+      <tr><td><code>relaxed</code> store, <code>relaxed</code> load</td><td class="num">60,670</td><td class="num">44,605</td><td class="num">65,975</td></tr>
+      <tr><td><code>release</code> store, <code>acquire</code> load</td><td class="num">45,388</td><td class="num">80,266</td><td class="num">37,660</td></tr>
+      <tr><td><code>seq_cst</code> store, <code>seq_cst</code> load</td><td class="num">0</td><td class="num">0</td><td class="num">0</td></tr>
+    </tbody>
+  </table></div>
+  <p>Out of every million trials, 4 to 8 percent ended with both loads reading stale values unless the operations were <code>seq_cst</code>. The program runs as part of <code>ctest</code> and fails if <code>seq_cst</code> ever shows the outcome.</p>
+
+  <h3>The memory orders</h3>
+  <p>Each atomic operation takes one of these. The guarantee is about the operations around it in the same thread, as seen from other threads.</p>
+  <dl class="orders">
+    <div>
+      <dt>memory_order_relaxed<span>loads, stores, read-modify-writes</span></dt>
+      <dd>
+        <p>Only atomicity: the operation is indivisible, and all threads see the writes to this one variable in the same order. Nothing is promised about other variables.</p>
+        <p class="here">Here: <code>FinishReadLazy()</code> checks the producer's <code>peerWaiting</code> flag with a relaxed load. It is only a hint. If the value is stale, the release happens a little later anyway, at the next check or before the consumer waits.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>memory_order_release<span>stores, read-modify-writes</span></dt>
+      <dd>
+        <p>No read or write that comes before the store in program order may become visible after it. Everything the thread did before the store is published together with it.</p>
+        <p class="here">Here: the meaning of every position the producer publishes and the consumer releases (the code uses <code>seq_cst</code> for those stores, which includes release).</p>
+      </dd>
+    </div>
+    <div>
+      <dt>memory_order_acquire<span>loads, read-modify-writes</span></dt>
+      <dd>
+        <p>No read or write that comes after the load may happen before it. If an acquire load reads the value a release store wrote, the store <em>synchronizes with</em> the load: everything before the store is visible to everything after the load.</p>
+        <p class="here">Here: every load of the other thread's position in the slow paths and in <code>WaitForPeer()</code>'s spin.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>memory_order_acq_rel<span>read-modify-writes</span></dt>
+      <dd>
+        <p>Acquire and release at once, for operations that read and write in one step: <code>exchange</code>, <code>fetch_add</code>, <code>compare_exchange</code>.</p>
+        <p class="here">Here: not used. The exchanges in the handshake are <code>seq_cst</code>, which includes it.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>memory_order_seq_cst<span>everything · the default</span></dt>
+      <dd>
+        <p>Acquire for loads, release for stores, acq_rel for read-modify-writes, and one more guarantee: all <code>seq_cst</code> operations in the program form a single total order that every thread agrees on, and that keeps each thread's program order. In practice, a <code>seq_cst</code> store followed by a <code>seq_cst</code> load of another variable can no longer swap, which is what store buffering needs.</p>
+        <p class="here">Here: the four operations of the sleep handshake in <code>Publish()</code> and <code>WaitForPeer()</code>, and the exchanges that resolve it.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>memory_order_consume<span>loads</span></dt>
+      <dd>
+        <p>Meant as a cheaper acquire for data reached through the loaded pointer. Compilers implement it as acquire, and its use has been discouraged since C++17. You can ignore it.</p>
+      </dd>
+    </div>
+  </dl>
+  <p>Read-modify-write operations have one more property that the handshake depends on, whatever their memory order: they always read the latest value in the variable's order of writes, and write in the same indivisible step. When two threads both call <code>exchange(false)</code> on a flag that is <code>true</code>, exactly one of them gets <code>true</code> back.</p>
+
+  <h3>Happens-before: why the command bytes need no atomics</h3>
+  <p>Inside one thread, statements are ordered by program order: each is <em>sequenced before</em> the next. Between threads, order comes only from <em>synchronizes-with</em> edges, when an acquire load reads what a release store wrote. <em>Happens-before</em> is any chain of these two kinds of edges. If every access to some ordinary memory on one thread happens before every conflicting access on the other thread, there is no data race. That is why only the two positions in the ring buffer are atomic, and the command bytes are plain memory:</p>
+  <figure class="hb">
+    <div class="diagram-wrap">
+    <svg viewBox="0 0 760 384" role="img" aria-label="Happens-before in the ring buffer. The producer writes the command bytes, then stores its position with release. The consumer loads that position with acquire, reads the command bytes, then stores its own position with release. The producer loads that position with acquire before writing new bytes in the same place.">
+      <defs>
+        <marker id="arrow-ink" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" style="fill: var(--ink)"/>
+        </marker>
+        <marker id="arrow-dim" viewBox="0 0 10 10" refX="8" refY="5" markerWidth="6" markerHeight="6" orient="auto-start-reverse">
+          <path d="M0,0 L10,5 L0,10 z" style="fill: var(--ink-3)"/>
+        </marker>
+      </defs>
+      <text class="t-p" x="160" y="18" font-size="12" font-weight="600" text-anchor="middle">PRODUCER</text>
+      <text class="t-c" x="600" y="18" font-size="12" font-weight="600" text-anchor="middle">CONSUMER</text>
+
+      <rect class="f-psoft" x="20" y="30" width="280" height="36" rx="6"/>
+      <text class="t-ink" x="34" y="53" font-size="12">write the command bytes</text>
+      <rect class="f-psoft" x="20" y="80" width="280" height="36" rx="6"/>
+      <text class="t-ink" x="34" y="103" font-size="12">FinishWrite(): pos.store(release)</text>
+      <rect class="f-csoft" x="460" y="130" width="280" height="36" rx="6"/>
+      <text class="t-ink" x="474" y="153" font-size="12">ReadSlowPath(): pos.load(acquire)</text>
+      <rect class="f-csoft" x="460" y="180" width="280" height="36" rx="6"/>
+      <text class="t-ink" x="474" y="203" font-size="12">read the command bytes</text>
+      <rect class="f-csoft" x="460" y="230" width="280" height="36" rx="6"/>
+      <text class="t-ink" x="474" y="253" font-size="12">FinishRead(): pos.store(release)</text>
+      <rect class="f-psoft" x="20" y="280" width="280" height="36" rx="6"/>
+      <text class="t-ink" x="34" y="303" font-size="12">WriteSlowPath(): pos.load(acquire)</text>
+      <rect class="f-psoft" x="20" y="330" width="280" height="36" rx="6"/>
+      <text class="t-ink" x="34" y="353" font-size="12">write new bytes in the same place</text>
+
+      <!-- program order -->
+      <line class="s-ink3" x1="160" y1="66" x2="160" y2="78" stroke-width="1.5" marker-end="url(#arrow-dim)"/>
+      <line class="s-ink3" x1="160" y1="116" x2="160" y2="278" stroke-width="1.5" stroke-dasharray="4 4" marker-end="url(#arrow-dim)"/>
+      <text class="t-ink3" x="172" y="200" font-size="11">program order</text>
+      <line class="s-ink3" x1="160" y1="316" x2="160" y2="328" stroke-width="1.5" marker-end="url(#arrow-dim)"/>
+      <line class="s-ink3" x1="600" y1="166" x2="600" y2="178" stroke-width="1.5" marker-end="url(#arrow-dim)"/>
+      <line class="s-ink3" x1="600" y1="216" x2="600" y2="228" stroke-width="1.5" marker-end="url(#arrow-dim)"/>
+
+      <!-- synchronizes with -->
+      <line class="s-ink" x1="300" y1="98" x2="456" y2="146" stroke-width="2" marker-end="url(#arrow-ink)"/>
+      <text class="t-ink" x="410" y="104" font-size="11" text-anchor="middle">synchronizes with</text>
+      <line class="s-ink" x1="460" y1="248" x2="304" y2="296" stroke-width="2" marker-end="url(#arrow-ink)"/>
+      <text class="t-ink" x="360" y="250" font-size="11" text-anchor="middle">synchronizes with</text>
+    </svg>
+    </div>
+    <figcaption>Two synchronizes-with edges per use of the same bytes. The first makes the command bytes visible to the consumer. The second guarantees the consumer has finished reading them before the producer writes new bytes in the same place.</figcaption>
+  </figure>
+
+  <h3>What each order costs</h3>
+  <p>The x86-64 column is what MSVC 19.51 generates with <code>/O2</code>, checked in its assembly listing. The ARM column is the standard mapping that GCC, Clang and MSVC use for AArch64; it was not compiled here.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Operation</th><th>x86-64</th><th>ARMv8 (AArch64)</th></tr></thead>
+    <tbody>
+      <tr><td>load, <code>relaxed</code></td><td><code>mov</code></td><td><code>ldr</code></td></tr>
+      <tr><td>load, <code>acquire</code></td><td><code>mov</code></td><td><code>ldar</code> (<code>ldapr</code> on newer cores)</td></tr>
+      <tr><td>load, <code>seq_cst</code></td><td><code>mov</code></td><td><code>ldar</code></td></tr>
+      <tr><td>store, <code>relaxed</code></td><td><code>mov</code></td><td><code>str</code></td></tr>
+      <tr><td>store, <code>release</code></td><td><code>mov</code></td><td><code>stlr</code></td></tr>
+      <tr><td>store, <code>seq_cst</code></td><td><code>xchg</code></td><td><code>stlr</code></td></tr>
+      <tr><td><code>exchange</code>, any order</td><td><code>xchg</code></td><td><code>swp</code> / <code>swpal</code>, or an <code>ldaxr</code>/<code>stlxr</code> loop</td></tr>
+    </tbody>
+  </table></div>
+  <p>On x86 every load already behaves like an acquire load and every store like a release store, so those orders cost nothing at run time. They still matter, because they stop the compiler from reordering. The expensive one is the <code>seq_cst</code> store: <code>xchg</code> with a memory operand is a locked instruction, and it waits until the core's store buffer has drained. An <code>exchange</code> is <code>xchg</code> whatever order you pass, because x86 has no cheaper read-modify-write.</p>
+  <p>On ARM, acquire and release are real instructions, though much cheaper than full barriers. A <code>stlr</code> followed by an <code>ldar</code> is never reordered, which is why the same two instructions also implement <code>seq_cst</code>. A relaxed load in place of the re-check's <code>ldar</code> could run ahead of the earlier <code>stlr</code>, and that is exactly the store-buffering outcome.</p>
+
+  <h3>Every atomic operation in SpscRingBuffer</h3>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Where</th><th>Operation</th><th>Order</th><th>Why that order</th></tr></thead>
+    <tbody>
+      <tr><td><code>WriteSlowPath()</code>, <code>WaitUntilConsumed()</code></td><td>load consumer's <code>pos</code></td><td>acquire</td><td>The consumer is done with the bytes before that position, so they may be overwritten.</td></tr>
+      <tr><td><code>ReadSlowPath()</code></td><td>load producer's <code>pos</code></td><td>acquire</td><td>The command bytes before that position are written and visible.</td></tr>
+      <tr><td><code>WaitForPeer()</code>, spin and first check</td><td>load other side's <code>pos</code></td><td>acquire</td><td>The same two reasons, while waiting.</td></tr>
+      <tr><td><code>Publish()</code></td><td>store own <code>pos</code></td><td>seq_cst</td><td>Release for the data, and the first half of the publisher's store-then-load pair.</td></tr>
+      <tr><td><code>Publish()</code></td><td>load <code>peerWaiting</code></td><td>seq_cst</td><td>The second half of that pair.</td></tr>
+      <tr><td><code>WaitForPeer()</code>, before sleeping</td><td>store <code>peerWaiting = true</code></td><td>seq_cst</td><td>The first half of the waiter's mirror-image pair.</td></tr>
+      <tr><td><code>WaitForPeer()</code>, re-check</td><td>load other side's <code>pos</code></td><td>seq_cst</td><td>The second half of that pair.</td></tr>
+      <tr><td><code>WakePeer()</code>, <code>WaitForPeer()</code></td><td><code>peerWaiting.exchange(false)</code></td><td>seq_cst</td><td>Exactly one thread wins; ordered with the rest of the handshake.</td></tr>
+      <tr><td><code>FinishReadLazy()</code></td><td>load <code>peerWaiting</code></td><td>relaxed</td><td>Only a hint: a stale value delays a release that happens later anyway.</td></tr>
+      <tr><td><code>std::binary_semaphore</code></td><td><code>release()</code>, <code>acquire()</code></td><td>built in</td><td>A <code>release()</code> happens before the <code>acquire()</code> it wakes up.</td></tr>
+    </tbody>
+  </table></div>
+
+  <h3>Rules of thumb</h3>
+  <ul>
+    <li><strong>Start from <code>seq_cst</code>,</strong> the default, and weaken one operation at a time, with the reason written in a comment next to it.</li>
+    <li><strong>To publish data,</strong> use a release store and an acquire load of the same atomic variable.</li>
+    <li><strong>For "store mine, then check yours" between two threads,</strong> use <code>seq_cst</code> on all four operations. A <code>std::atomic_thread_fence(std::memory_order_seq_cst)</code> between the store and the load, on both sides, also works.</li>
+    <li><strong>Use relaxed</strong> only for values that nothing else depends on: counters, statistics, hints.</li>
+    <li><strong><code>volatile</code> is not a synchronization tool</strong> in C++. It gives no atomicity and no ordering between threads. MSVC gives it acquire and release meaning on x86 and x64 as an extension (<code>/volatile:ms</code>), which is not portable.</li>
+    <li><strong>x86 hides ordering bugs,</strong> because its hardware reorders so little. Code that is right on x86 by luck can fail on ARM, or after the compiler reorders it. Litmus programs and stress tests on real hardware catch some of these bugs. Reasoning about happens-before catches the rest.</li>
+  </ul>
+</section>
+
+<section id="step-7">
+  <p class="eyebrow">Step 7 <span class="of">of 13</span></p>
+  <h2>Publishing with release and acquire</h2>
+  <p>So far each thread only touches its own state. The threads meet at two points: the producer publishing its position, and the consumer releasing its own. In Daugaard's first version these are a release store and an acquire load:</p>
+  <div class="codeblock"><div class="file"><b>version 1</b><span>as in the first article</span></div>
+<pre><code class="language-cpp">void FinishWrite()
+{
+    m_WriterShared.pos.store(m_Writer.base + m_Writer.pos, std::memory_order_release);
+}
+
+// in ReadSlowPath():
+std::size_t writerPos = m_WriterShared.pos.load(std::memory_order_acquire);</code></pre></div>
+  <p>Because the position is a <code>std::atomic&lt;size_t&gt;</code>, neither thread can see half a number. The memory orders do the real work. A release store guarantees that every write the producer made before it, the command bytes included, is visible to a thread whose acquire load reads the stored value. Without that guarantee the compiler or the CPU could make the new position visible before the bytes it covers, and the consumer would read garbage.</p>
+  <p>The same pair runs the other way. <code>FinishRead()</code> stores the consumer's position with release and the producer loads it with acquire before reusing the space, so the consumer is done reading bytes before the producer overwrites them. It also gives the producer a way to see the consumer's results: whatever a command did on the consumer thread is visible to the producer once it has waited for that command.</p>
+  <div class="evidence"><span class="tag">Tested</span><code>CommandBuffer_WaitUntilExecutedSynchronizes</code> has commands push into a plain <code>std::vector</code> on the consumer thread, and the producer reads the vector after each wait. The test itself uses no atomics; the ring buffer's release and acquire provide the ordering.</div>
+  <p>On x86 a release store and an acquire load compile to ordinary <code>mov</code> instructions, because the hardware already keeps those orders. They still matter there: they stop the compiler from reordering, and on ARM they become the <code>stlr</code> and <code>ldar</code> instructions that the hardware needs. <a href="#step-9">Step 9</a> strengthens both operations to sequential consistency, for a reason that has nothing to do with the data.</p>
+</section>
+
+<section id="step-8">
+  <p class="eyebrow">Step 8 <span class="of">of 13</span></p>
+  <h2>The slow path, and the first deadlock</h2>
+  <p>After the wrap check, each slow path loads the other thread's position, checks whether the block fits, waits if it does not, and recomputes its cached <code>end</code>:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b></div>
+<pre><code class="language-cpp">CB_NOINLINE void WriteSlowPath(std::size_t&amp; pos, std::size_t&amp; end)
+{
+    assert(end - pos &lt;= m_Writer.size &amp;&amp; "a single allocation must fit in the ring buffer");
+    std::size_t base = m_Writer.base;
+    if (end &gt; m_Writer.size)
+    {
+        end -= pos;                     // wrap, see step 6
+        pos = 0;
+        base += m_Writer.size;
+    }
+
+    // The producer may run at most one full buffer ahead of what the consumer released,
+    // so the consumer must have released everything up to `required`.
+    std::size_t required = base + end - m_Writer.size;
+    std::size_t readerPos = m_ReaderShared.pos.load(std::memory_order_acquire);
+    if (Distance(required, readerPos) &lt; 0)
+    {
+        // Never wait while holding unpublished data: the consumer may need exactly that
+        // data before it can release the space we are waiting for.
+        FinishWrite();
+        readerPos = WaitForPeer(m_ReaderShared, m_WriterWakeup, required);
+    }
+    m_Writer.base = base;
+    m_Writer.end = std::min(readerPos + m_Writer.size - base, m_Writer.size);
+}</code></pre></div>
+  <p>Every wait in the ring buffer has the same form: wait until the other thread's position reaches a <code>required</code> stream position. The producer needs the consumer to have released up to one capacity behind the end of the new block. The new <code>end</code> is then the consumer's released position plus one capacity, expressed as an offset in the producer's current lap, and capped at the physical end. <code>ReadSlowPath()</code> is the mirror image: it needs the producer to have published up to the end of the block, and its new limit is the producer's published position, also capped at the end of the buffer.</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b><span>ReadSlowPath(), after the wrap check</span></div>
+<pre><code class="language-cpp">// The producer must have published everything up to `required`.
+std::size_t required = base + end;
+std::size_t writerPos = m_WriterShared.pos.load(std::memory_order_acquire);
+if (Distance(required, writerPos) &lt; 0)
+    writerPos = WaitForPeer(m_WriterShared, m_ReaderWakeup, required);   // step 11 adds a release before this
+m_Reader.base = base;
+m_Reader.end = std::min(writerPos - base, m_Reader.size);</code></pre></div>
+  <p>Look at the <code>FinishWrite()</code> before the wait. Without it, this happens: the producer records a large frame without submitting, the buffer fills, and the producer waits for space. The consumer, meanwhile, has run out of published data and waits for the producer. The data it needs is sitting right there in the buffer, unpublished. Neither thread moves again.</p>
+  <div class="rule"><span class="tag">Rule 2</span><p>Never wait while holding data the other thread needs. Before the producer waits for space, it publishes what it has written. The consumer may then start on a command whose second half is not written yet; it simply waits at that read like at any other.</p></div>
+  <p>This is what makes large batches safe: <code>CommandBuffer</code> users call <code>Submit()</code> once per frame, however big the frame is.</p>
+  <p>The consumer has the mirror-image problem, and it cannot fix it the same way. <code>Read()</code> returns references into the ring, so the ring cannot release bytes behind the consumer's back while it might still be using them. There is a limit instead:</p>
+  <div class="rule"><span class="tag">Rule 3</span><p>While the consumer waits for the rest of a message, the bytes it holds plus the bytes the producer still has to write must fit in the buffer. In practice: release after each message, and keep a message well under half the capacity, because a wrap can add a gap almost as large as one block. <code>CommandBuffer</code> asserts that each command is at most half the capacity.</p></div>
+  <div class="evidence"><span class="tag">Tested</span>Deleting that <code>FinishWrite()</code> makes <code>RingBuffer_TwoThreads_SmallBuffer</code> hang, because its producer publishes only every eighth record on average. <code>RingBuffer_FullBufferProducerSleeps</code> records 16 KB of commands into a 4 KB buffer without submitting.</div>
+</section>
+
+<section id="step-9">
+  <p class="eyebrow">Step 9 <span class="of">of 13</span></p>
+  <h2>Sleeping without losing wake-ups</h2>
+  <p>Version 1 waits by spinning: it reloads the other thread's position in a loop. That is fine when each thread has its own core and waits are short. It is bad when a wait is long, because a render thread with nothing to render burns an entire core. It is worse when the other thread is not running at all, because the spinning thread takes the CPU time that thread needs. Daugaard's third article replaces the spin with a semaphore. The hard part is releasing the semaphore only when someone is actually asleep: releasing it on every <code>FinishWrite()</code> would put an OS call into every publish.</p>
+  <p>Each <code>SharedState</code> gets a flag, and each thread gets a semaphore to sleep on. A thread that wants to sleep sets <code>peerWaiting</code> in the other thread's shared state. The other thread checks the flag after it publishes, and releases the semaphore only if it is set. Done naively, that loses wake-ups:</p>
+  <div class="table-wrap"><table class="timeline">
+    <thead><tr><th>#</th><th>Producer</th><th>Consumer</th></tr></thead>
+    <tbody>
+      <tr><td>1</td><td></td><td>loads the producer's position: 100. It needs 108.</td></tr>
+      <tr><td>2</td><td>stores position 108</td><td></td></tr>
+      <tr><td>3</td><td>loads <code>peerWaiting</code>: false, so it releases nothing</td><td></td></tr>
+      <tr><td>4</td><td></td><td>stores <code>peerWaiting = true</code></td></tr>
+      <tr><td>5</td><td></td><td class="bad">sleeps. Its data is there, and nobody will wake it.</td></tr>
+    </tbody>
+  </table></div>
+  <p>If the producer then fills the buffer and waits for the consumer, both threads sleep forever. The fix is to look again after asking:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b><span>WaitForPeer(), the sleeping part</span></div>
+<pre><code class="language-cpp">for (;;)
+{
+    std::size_t pos = peer.pos.load(std::memory_order_acquire);
+    if (Distance(required, pos) &gt;= 0)
+        return pos;
+
+    // Ask to be woken, then look again: the peer may have published after our load
+    // but before it could see the request.
+    peer.peerWaiting.store(true, std::memory_order_seq_cst);
+    if (peer.pos.load(std::memory_order_seq_cst) != pos)
+    {
+        // It did publish. Withdraw the request and re-check, unless the peer already
+        // took the request, in which case its release() is on the way.
+        if (peer.peerWaiting.exchange(false, std::memory_order_seq_cst))
+            continue;
+    }
+    wakeup.acquire();
+}</code></pre></div>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b><span>the other side</span></div>
+<pre><code class="language-cpp">// Store our new position, then wake the other thread if it asked to be woken.
+static void Publish(SharedState&amp; mine, std::size_t pos, std::binary_semaphore&amp; peerWakeup)
+{
+    mine.pos.store(pos, std::memory_order_seq_cst);
+    if (mine.peerWaiting.load(std::memory_order_seq_cst)) [[unlikely]]
+        WakePeer(mine, peerWakeup);
+}
+
+static CB_NOINLINE void WakePeer(SharedState&amp; mine, std::binary_semaphore&amp; peerWakeup)
+{
+    // Exactly one of us and the peer gets to reset the flag. If the peer reset it first,
+    // it withdrew its request and is not going to sleep.
+    if (mine.peerWaiting.exchange(false, std::memory_order_seq_cst))
+        peerWakeup.release();
+}</code></pre></div>
+  <p><code>FinishWrite()</code> and <code>FinishRead()</code> both call <code>Publish()</code>. After setting its flag, the waiting thread reloads the position. If the position changed, the other thread published in between and may or may not have seen the request. Both threads then race to reset the flag with <code>exchange(false)</code>, and exactly one wins:</p>
+  <ul>
+    <li><strong>The waiting thread wins.</strong> The publisher never saw the request and will not release the semaphore. The waiter withdraws and checks the position again.</li>
+    <li><strong>The publisher wins.</strong> It has released the semaphore or is about to. The waiter calls <code>acquire()</code>, which returns at once.</li>
+  </ul>
+  <p>Either way every <code>release()</code> is matched by exactly one <code>acquire()</code>, so a <code>std::binary_semaphore</code> is enough. In the common case nobody is asleep, and the publisher pays one extra load of a flag from a cache line it already owns. The <code>exchange</code> only runs when the flag is set.</p>
+
+  <h3>Why every operation in the handshake is seq_cst</h3>
+  <p>The re-check only helps if the two threads cannot <em>both</em> read stale values: the waiter reading the old position after setting its flag, and the publisher reading the old flag after storing its position. Each thread stores one variable and then loads the other. That is the store-buffering pattern from the <a href="#memory-order">memory ordering</a> section, and x86 allows exactly this outcome: a store sits in the core's store buffer while the following load already reads from the cache. Release and acquire do not forbid it; the litmus program there catches it in 4 to 8 percent of trials. Jeff Preshing's <a href="https://preshing.com/20120515/memory-reordering-caught-in-the-act/">Memory Reordering Caught in the Act</a> shows it happening on real hardware.</p>
+  <p>Making the four operations <code>memory_order_seq_cst</code> forbids it. Sequentially consistent operations form one total order that every thread agrees on, and that order respects each thread's program order. Suppose the publisher's flag load misses the waiter's flag store. Then the load comes before the store in the total order, which gives the chain</p>
+  <div class="codeblock"><div class="file"><b>the total order</b></div>
+<pre><code class="nohighlight">publisher stores pos  →  publisher loads flag  →  waiter stores flag  →  waiter loads pos</code></pre></div>
+  <p>so the waiter's load comes after the publisher's store and must see it. At least one side always sees the other.</p>
+  <div class="evidence"><span class="tag">Tested</span>This is not theoretical. With these four operations weakened to release and acquire, <code>CommandBuffer_PingPongAlwaysSleeping</code>, <code>RingBuffer_TwoThreads_TinyBuffer</code> and <code>RingBuffer_TwoThreads_NoSpinning</code> hung on every run on the Ryzen 7 9700X.</div>
+  <p>Daugaard's version publishes with a release store followed by an unconditional <code>exchange</code>, and re-checks with a relaxed load. On x86 that works in practice: the exchange and the sequentially consistent flag store each compile to a locked instruction, which drains the store buffer. That variant passes all 23 tests here. The C++ memory model does not promise it, though, and on ARM a relaxed load may run ahead of an earlier store-release. The version here pays the same price on x86, one locked instruction per publish (the seq_cst store becomes <code>xchg</code>), and is correct on any CPU.</p>
+  <p>That locked instruction is why publishing after every single 4-byte int costs 5.6 ns here, where Daugaard's version 1 took 1.7 ns. He notes that the semaphore version makes finishing about an order of magnitude more expensive and recommends publishing in larger chunks. Publishing every 256 items brings the cost down to 0.75 ns per int.</p>
+  <div class="evidence"><span class="tag">Tested</span><code>RingBuffer_EmptyBufferConsumerSleeps</code> lets the consumer wait 300 ms on an empty buffer and measures its CPU time: 0 µs. <code>RingBuffer_FullBufferProducerSleeps</code> does the same for a producer blocked on a full buffer.</div>
+</section>
+
+<section id="step-10">
+  <p class="eyebrow">Step 10 <span class="of">of 13</span></p>
+  <h2>Spin, then sleep</h2>
+  <p>Going to sleep and being woken up costs microseconds. If the other thread is running and will publish within a few hundred nanoseconds, sleeping is a waste. So <code>WaitForPeer()</code> first polls a bounded number of times, then goes through the flag protocol:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b><span>WaitForPeer(), the spinning part</span></div>
+<pre><code class="language-cpp">for (std::uint32_t i = 0; i &lt; m_SpinCount; ++i)
+{
+    CB_CPU_RELAX();
+    std::size_t pos = peer.pos.load(std::memory_order_acquire);
+    if (Distance(required, pos) &gt;= 0)
+        return pos;
+}
+
+// CB_CPU_RELAX() is _mm_pause() on x86 and __yield() / "yield" on ARM.</code></pre></div>
+  <p>The pause instruction tells the core that this is a spin-wait. It slows the loop down, saves power, and gives the other hyper-thread on the same core more of the shared resources. The spin count is a constructor argument and defaults to 256.</p>
+  <div class="chart" role="img" aria-label="Round-trip latency: 0.08 microseconds with spinning, 0.69 microseconds when the waiting threads always sleep.">
+    <h4>Round trip: record one command, then wait until it has run</h4>
+    <p class="sub">microseconds per round trip, median of 5 runs · shorter is faster</p>
+    <div class="bars">
+      <span class="name">spin, then sleep (default)</span>
+      <span class="track" title="0.08 µs per round trip"><span class="bar" style="width: 11.6%"></span><span class="val">0.08 µs</span></span>
+      <span class="name">sleep at once (spinCount = 0)</span>
+      <span class="track" title="0.69 µs per round trip"><span class="bar base" style="width: 100%"></span><span class="val">0.69 µs</span></span>
+    </div>
+  </div>
+  <p>Sleeping at once is still fast on an otherwise idle machine. On a loaded machine a woken thread may have to wait for a free core, so the gap grows. Spinning has a cost of its own, too: the waiting thread keeps reading the other thread's cache line. Keep the spin short.</p>
+</section>
+
+<section id="step-11">
+  <p class="eyebrow">Step 11 <span class="of">of 13</span></p>
+  <h2>Releasing lazily</h2>
+  <p>The obvious way for the command layer to give space back is <code>FinishRead()</code> after every command. Measured with the producer submitting every 64 commands, that runs at <strong>42.6 ns</strong> per command, no faster than the mutex queue. The cause is step 3's false sharing, one level up. The producer is usually ahead, so it sits in its slow path polling the consumer's released position, and the consumer writes that position after every command. The cache line crosses between the cores once per command.</p>
+  <p>The fix is to release less often, but the consumer cannot simply release every <em>N</em> commands. A consumer that waits while sitting on finished bytes can deadlock a producer that waits for that space. And a producer waiting for one particular command would also wait for up to <em>N</em>−1 unrelated ones. <code>FinishReadLazy()</code> only records how far the consumer is done, and publishes that position when one of three things happens:</p>
+  <ul>
+    <li><strong>A sixteenth of the capacity is pending.</strong> A streaming producer gets space back in large chunks, with one cache-line transfer per chunk.</li>
+    <li><strong>The producer is asleep waiting for the consumer.</strong> Its <code>peerWaiting</code> flag is set. Checking it is a load from the consumer's own shared line.</li>
+    <li><strong>The consumer is about to wait for data.</strong> <code>ReadSlowPath()</code> releases everything finished before it waits, so rule 2 holds on this side too.</li>
+  </ul>
+  <div class="codeblock"><div class="file"><b>include/cb/SpscRingBuffer.h</b></div>
+<pre><code class="language-cpp">CB_FORCE_INLINE void FinishReadLazy()
+{
+    m_Reader.finished = m_Reader.base + m_Reader.pos;
+    // The flag is only a hint, so relaxed is enough: if it is stale, the release still
+    // happens at a later call or before the consumer waits.
+    if (Distance(m_Reader.published, m_Reader.finished) &gt;= static_cast&lt;std::ptrdiff_t&gt;(m_Reader.lazyLimit) ||
+        m_ReaderShared.peerWaiting.load(std::memory_order_relaxed)) [[unlikely]]
+        FinishRead();
+}
+
+// in ReadSlowPath(), before waiting:
+if (Distance(required, writerPos) &lt; 0)
+{
+    // Never wait while holding bytes we are done with (FinishReadLazy()): the producer
+    // may be waiting for exactly that space.
+    if (m_Reader.published != m_Reader.finished)
+    {
+        m_Reader.published = m_Reader.finished;
+        Publish(m_ReaderShared, m_Reader.published, m_WriterWakeup);
+    }
+    writerPos = WaitForPeer(m_WriterShared, m_ReaderWakeup, required);
+}</code></pre></div>
+  <p>With <code>FinishReadLazy()</code> after each command, the same benchmark runs at <strong>3.5 ns</strong> per command: twelve times faster than releasing eagerly, and thirteen times faster than the mutex queue. At the ring-buffer level, <code>FinishReadLazy()</code> after every int costs 0.85 ns per int, against 5.6 ns for <code>FinishRead()</code> after every int.</p>
+  <p>One latency problem remains. Within a batch the consumer releases lazily. Suppose it finishes batch A and starts a slow command from batch B; a producer that now starts waiting for the end of A sits there until the slow command ends. The command layer closes that gap with a marker at the end of each batch, in the next step.</p>
+  <div class="evidence"><span class="tag">Tested</span><code>RingBuffer_LazyReleaseBeforeConsumerWaits</code> has the producer wait for every single 4-byte item while the consumer only ever finishes lazily. Remove the release before waiting and the test hangs. Two stress tests run the random-record stream with lazy releases only.</div>
+</section>
+
+<section id="step-12">
+  <p class="eyebrow">Step 12 <span class="of">of 13</span></p>
+  <h2>Commands: a type and a payload</h2>
+  <p>A command is a command type, a 4-byte number, followed by a payload of plain data. The game thread calls a function such as <code>commands.SetClearColor(color)</code>, which writes <code>kCmd_SetClearColor</code> and then the color. The render thread waits until a command is ready, reads its type, switches on it, reads the payload that belongs to that type, and executes it. Three record shapes cover everything:</p>
+  <div class="layout" role="img" aria-label="Byte layouts of the three record shapes">
+    <div class="layout-row"><span class="label">WriteCommand(type, payload)</span><div class="bytes"><span class="hdr">type · 4 B</span><span class="obj">payload · sizeof(Payload) bytes</span></div></div>
+    <div class="layout-row"><span class="label">WriteCommand(type, payload), then WriteArray(values, count)</span><div class="bytes"><span class="hdr">type</span><span class="obj">payload, including the count</span><span class="arr">T[count]</span></div></div>
+    <div class="layout-row"><span class="label">WriteCommand(type), Submit(), SubmitStop()</span><div class="bytes"><span class="hdr">type · 4 B</span></div></div>
+  </div>
+  <p>The work is split in two. <code>cb::CommandBuffer</code> is generic: it writes and reads types and payloads, and owns two built-in types for batches and stopping. Your class derives from it and defines the actual commands.</p>
+
+  <h3>The command types</h3>
+  <div class="codeblock"><div class="file"><b>include/cb/CommandBuffer.h</b><span>and examples/RenderThreadExample.cpp</span></div>
+<pre><code class="language-cpp">namespace cb
+{
+using CommandType = std::uint32_t;
+
+// Command types every CommandBuffer understands. Applications number theirs from kCmd_FirstUser.
+enum : CommandType
+{
+    kCmd_EndOfBatch = 0, // written by Submit()
+    kCmd_Stop       = 1, // written by SubmitStop()
+    kCmd_FirstUser  = 2,
+};
+}
+
+// The command types of RenderCommandBuffer.
+enum RenderCommand : cb::CommandType
+{
+    kCmd_SetClearColor = cb::kCmd_FirstUser, // payload: Color
+    kCmd_CreateMesh,                         // payload: CreateMeshPayload, then vertexCount floats
+    kCmd_Draw,                               // payload: DrawPayload
+    kCmd_Present,                            // payload: int frame
+};
+
+// One plain struct per command with more than one field, written and read as a whole.
+struct CreateMeshPayload
+{
+    int mesh;
+    std::uint32_t vertexCount;
+};
+
+struct DrawPayload
+{
+    int mesh;
+    Transform transform;
+};</code></pre></div>
+
+  <h3>The game thread's side</h3>
+  <p>Each command gets one producer function. It writes the type and the payload with the protected helpers of <code>cb::CommandBuffer</code>:</p>
+  <div class="codeblock"><div class="file"><b>examples/RenderThreadExample.cpp</b></div>
+<pre><code class="language-cpp">class RenderCommandBuffer : public cb::CommandBuffer
+{
+public:
+    using CommandBuffer::CommandBuffer;
+
+    void SetClearColor(const Color&amp; color) { WriteCommand(kCmd_SetClearColor, color); }
+
+    // The vertex data is copied into the command buffer itself.
+    void CreateMesh(int mesh, const float* vertices, std::uint32_t vertexCount)
+    {
+        WriteCommand(kCmd_CreateMesh, CreateMeshPayload{mesh, vertexCount});
+        WriteArray(vertices, vertexCount);
+    }
+
+    void Draw(int mesh, const Transform&amp; transform) { WriteCommand(kCmd_Draw, DrawPayload{mesh, transform}); }
+
+    void Present(int frame) { WriteCommand(kCmd_Present, frame); }
+    ...</code></pre></div>
+  <div class="codeblock"><div class="file"><b>include/cb/CommandBuffer.h</b><span>the producer helpers</span></div>
+<pre><code class="language-cpp">// Write a command and its payload. The payload is copied as bytes, so it must be plain
+// data: pass handles, indices or pointers for anything that owns memory.
+template &lt;class Payload&gt;
+void WriteCommand(CommandType type, const Payload&amp; payload) noexcept
+{
+    static_assert(std::is_trivially_copyable_v&lt;Payload&gt;, "a payload is copied as bytes");
+    WriteCommand(type);                       // the type alone
+    CheckCommandSize(sizeof(Payload) + alignof(Payload));
+    m_Ring.Write&lt;Payload&gt;(payload);
+}
+
+// Append an array to the command written last, e.g. vertex data.
+template &lt;class T&gt;
+void WriteArray(const T* values, std::size_t count) noexcept
+{
+    CheckCommandSize(sizeof(T) * count + alignof(T));
+    m_Ring.WriteArray&lt;T&gt;(values, count);
+}</code></pre></div>
+  <p>Nothing is allocated: a draw command is 4 bytes of type plus a 16-byte payload, copied straight into the ring. Vertex data for <code>CreateMesh()</code> follows its payload in the ring too, so even variable-size commands cost no allocation. <code>CheckCommandSize()</code> adds up the bytes of the current command and asserts rule 3: a command may be at most half the capacity.</p>
+
+  <h3>The render thread's side</h3>
+  <div class="codeblock"><div class="file"><b>examples/RenderThreadExample.cpp</b></div>
+<pre><code class="language-cpp">void ExecuteUntilStopped(Renderer&amp; renderer)
+{
+    cb::CommandType type;
+    while (ReadCommand(type))
+    {
+        switch (type)
+        {
+            case kCmd_SetClearColor:
+            {
+                renderer.SetClearColor(ReadPayload&lt;Color&gt;());
+                break;
+            }
+
+            case kCmd_CreateMesh:
+            {
+                const CreateMeshPayload&amp; payload = ReadPayload&lt;CreateMeshPayload&gt;();
+                const float* vertices = ReadArray&lt;float&gt;(payload.vertexCount);
+                renderer.CreateMesh(payload.mesh, vertices, payload.vertexCount);
+                break;
+            }
+
+            case kCmd_Draw:
+            {
+                const DrawPayload&amp; payload = ReadPayload&lt;DrawPayload&gt;();
+                renderer.Draw(payload.mesh, payload.transform);
+                break;
+            }
+
+            case kCmd_Present:
+            {
+                renderer.Present(ReadPayload&lt;int&gt;());
+                break;
+            }
+
+            default:
+            {
+                assert(false &amp;&amp; "unknown render command");
+                break;
+            }
+        }
+        FinishCommand();
+    }
+}</code></pre></div>
+  <p><code>ReadPayload()</code> and <code>ReadArray()</code> return references and pointers into the ring itself, so the payload is used where it lies. <code>FinishCommand()</code> gives the command's bytes back lazily (step 11); until then the references stay valid. The render thread starts with a member-function pointer, so no extra code is needed to launch it:</p>
+  <div class="codeblock"><div class="file"><b>examples/RenderThreadExample.cpp</b></div>
+<pre><code class="language-cpp">std::thread renderThread(&amp;RenderCommandBuffer::ExecuteUntilStopped, &amp;commands, std::ref(renderer));</code></pre></div>
+  <p>A <code>switch</code> over a dense enum compiles to a jump table, and the payload is read in place, so dispatching a command costs very little. The benchmark moves small commands at 3.1 to 3.5 ns each.</p>
+
+  <h3>Rule 1 is now in your hands</h3>
+  <p>The consumer must read exactly what the producer wrote for each type: the same payload type, then the same arrays, in the same order. If a case reads a different size or alignment, every command after it is misread. These habits make that hard to get wrong:</p>
+  <ul>
+    <li><strong>One payload struct per command.</strong> Write it with one <code>WriteCommand()</code> and read it with one <code>ReadPayload()</code> of the same type. Same type means the same size and alignment on both sides. Single values like a <code>Color</code> or an <code>int</code> are their own payload.</li>
+    <li><strong>Read into local variables, in order.</strong> Never put two reads in one function call's arguments. C++ does not specify the order in which arguments are evaluated, so <code>renderer.Draw(ReadPayload&lt;int&gt;(), ReadPayload&lt;Transform&gt;())</code> may read the transform first.</li>
+    <li><strong>Keep the three parts together.</strong> Adding a command touches the enum, the producer function and the <code>case</code>. Keep them next to each other, in the same order.</li>
+    <li><strong>Assert in <code>default</code>.</strong> An unknown type means the stream is already out of sync.</li>
+  </ul>
+  <div class="evidence"><span class="tag">Tested</span><code>CommandBuffer_PayloadsRoundTrip</code> interleaves five command types with payloads of up to 44 bytes, including a 32-byte-aligned struct and arrays of 0 to 7 ints, in a 1 KB buffer, and checks every value. With the producer writing payloads without their alignment, the stream goes out of sync and the test hangs.</div>
+
+  <h3>Batches, tickets and stopping</h3>
+  <p><code>Submit()</code> ends a batch. It writes the built-in <code>kCmd_EndOfBatch</code>, publishes, and returns a <em>ticket</em>: the stream position just after the marker. <code>ReadCommand()</code> handles the built-in types itself, so your <code>switch</code> never sees them:</p>
+  <div class="codeblock"><div class="file"><b>include/cb/CommandBuffer.h</b></div>
+<pre><code class="language-cpp">Ticket Submit() noexcept
+{
+    m_Ring.Write&lt;CommandType&gt;(kCmd_EndOfBatch);
+    m_Ring.FinishWrite();
+    return m_Ring.WritePosition();
+}
+
+void WaitUntilExecuted(Ticket ticket) { m_Ring.WaitUntilConsumed(ticket); }
+
+// Wait until a command is ready and return its type. Returns false when the producer
+// has called SubmitStop(). The end-of-batch markers written by Submit() are handled here.
+bool ReadCommand(CommandType&amp; type) noexcept
+{
+    for (;;)
+    {
+        type = m_Ring.Read&lt;CommandType&gt;();
+        if (type == kCmd_EndOfBatch)
+        {
+            // The end of a submitted batch: release right away, the producer may be
+            // waiting for it in WaitUntilExecuted().
+            m_Ring.FinishRead();
+            continue;
+        }
+        if (type == kCmd_Stop)
+        {
+            m_Ring.FinishRead();
+            return false;
+        }
+        return true;
+    }
+}</code></pre></div>
+  <p>Inside a batch the consumer releases lazily; at the marker it releases eagerly. So <code>WaitUntilExecuted(ticket)</code> returns as soon as the batch has run, whatever the consumer starts on next, while long batches still pay for almost no synchronization. <code>WaitUntilConsumed()</code> publishes first (rule 2), then waits on the consumer's released position with the same spin-then-sleep logic as everything else. <code>SubmitStop()</code> writes <code>kCmd_Stop</code>, which makes <code>ReadCommand()</code> return false and ends the loop.</p>
+  <div class="evidence"><span class="tag">Tested</span><code>CommandBuffer_TicketDoesNotWaitForLaterCommands</code> waits for a batch while the consumer is inside a 400 ms command from the next batch. The wait takes 0 µs. When the marker releases lazily instead, the wait lasts until the slow command finishes and the test fails.</div>
+
+  <div class="rule"><span class="tag">Pitfalls</span>
+    <p><strong>Plain data only.</strong> Payloads are copied as bytes, which a <code>static_assert</code> enforces. To hand over something that owns memory, pass a pointer or handle and decide which thread frees it. Anything a pointer refers to must stay alive until the command has run; frame pacing (next step) bounds how long that is.</p>
+    <p><strong>One producer.</strong> Only the producer thread may call command functions. A <code>case</code> must not record into its own buffer, and must not wait for the producer, since the producer may be waiting for it.</p>
+    <p><strong>Submit in batches.</strong> Every <code>Submit()</code> costs a locked instruction and a cache-line transfer on each side. Submitting after every single command costs 20 ns per command here, six times the batched cost.</p>
+  </div>
+</section>
+
+<section id="step-13">
+  <p class="eyebrow">Step 13 <span class="of">of 13</span></p>
+  <h2>A render loop</h2>
+  <p>Put together, a game loop with a render thread and frame pacing looks like this. The full program is <code>examples/RenderThreadExample.cpp</code>.</p>
+  <div class="codeblock"><div class="file"><b>examples/RenderThreadExample.cpp</b></div>
+<pre><code class="language-cpp">RenderCommandBuffer commands(256 * 1024);
+Renderer renderer; // from here on, only touched by the render thread
+std::thread renderThread(&amp;RenderCommandBuffer::ExecuteUntilStopped, &amp;commands, std::ref(renderer));
+
+// Loading. The game thread picks the mesh handle; the render thread creates the mesh
+// when it gets to the command.
+const float triangle[] = {0.0f, 0.5f, -0.5f, -0.5f, 0.5f, -0.5f};
+const int triangleMesh = 0;
+commands.CreateMesh(triangleMesh, triangle, 6);
+
+std::vector&lt;cb::CommandBuffer::Ticket&gt; frameEnd(kFrames);
+for (int frame = 0; frame &lt; kFrames; ++frame)
+{
+    // Frame pacing: wait until the render thread has finished frame N - 2.
+    if (frame &gt;= kMaxFramesInFlight)
+        commands.WaitUntilExecuted(frameEnd[frame - kMaxFramesInFlight]);
+
+    // Game update, then record this frame's rendering.
+    float time = frame / 60.0f;
+    commands.SetClearColor(Color{0.5f + 0.5f * std::sin(time), 0.2f, 0.3f});
+    for (int i = 0; i &lt; kObjects; ++i)
+        commands.Draw(triangleMesh, Transform{std::cos(time + i), std::sin(time + i), time * i});
+    commands.Present(frame);
+    frameEnd[frame] = commands.Submit();
+}
+
+commands.SubmitStop();
+renderThread.join(); // the Renderer is ours again</code></pre></div>
+  <div class="codeblock"><div class="file"><b>output</b></div>
+<pre><code class="nohighlight">render thread: frame   0, 100 draws, clear color (0.50, 0.20, 0.30)
+render thread: frame  60, 100 draws, clear color (0.92, 0.20, 0.30)
+render thread: frame 120, 100 draws, clear color (0.95, 0.20, 0.30)
+render thread: frame 180, 100 draws, clear color (0.57, 0.20, 0.30)
+game thread: rendered 240 frames, checksum -590.232</code></pre></div>
+  <p>The game thread keeps a ticket for every frame. Before recording frame N it waits for the end of frame N−2, so it is never more than two frames ahead. The <code>Renderer</code> is only ever touched by the render thread, so it needs no locks of its own. Resource handles such as the mesh id are chosen by the game thread; the render thread creates the resource when it reaches the command.</p>
+</section>
+
+<section id="tests">
+  <p class="eyebrow">Verification</p>
+  <h2>Testing</h2>
+  <p>The tests are in <code>tests/Tests.cpp</code> and use no framework. A watchdog thread aborts the run if a test takes longer than 60 seconds, because a concurrent queue usually fails by hanging, not by returning a wrong value. <code>CommandBufferTests Lazy</code> runs only the tests whose name contains "Lazy". The command tests use a <code>TestCommandBuffer</code> with eight test commands and a <code>switch</code>, built exactly like <code>RenderCommandBuffer</code>.</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Group</th><th>What it checks</th></tr></thead>
+    <tbody>
+      <tr><td>Layout, one thread<br><span class="note">5 tests</span></td><td>Values round-trip; alignment and exact addresses; the gap at a wrap on both sides; filling the buffer completely, three laps in a row; objects with destructors stored in place.</td></tr>
+      <tr><td>Two-thread streams<br><span class="note">7 tests</span></td><td>Records of 0 to 200 random bytes with random alignments from 1 to 64, published and released at random points, every byte verified. Variants: 4 KB and 1 MB buffers, no spinning at all, a 768-byte buffer, a stream that starts just below <code>SIZE_MAX</code>, and lazy releases.</td></tr>
+      <tr><td>Waiting<br><span class="note">3 tests</span></td><td>A sleeping consumer and a sleeping producer use no CPU (measured with <code>GetThreadTimes</code>); a lazily releasing consumer still releases before it waits.</td></tr>
+      <tr><td>Command buffer<br><span class="note">8 tests</span></td><td>2 million commands run in order on the consumer thread; mixed payload sizes and alignments arrive intact; side effects are visible after a wait; tickets ignore later commands; 50,000 round trips with every wait sleeping; array payloads arrive intact; a slow consumer; frame pacing.</td></tr>
+    </tbody>
+  </table></div>
+  <p>Passing tests only prove something if they can fail. To check that, a script injected one bug at a time into a copy of the headers, rebuilt the tests, and ran them:</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Injected bug</th><th>Caught by</th><th>Symptom</th></tr></thead>
+    <tbody>
+      <tr><td>Sleep without re-checking the position (step 9)</td><td><code>TwoThreads_TinyBuffer</code></td><td>hang</td></tr>
+      <tr><td>Handshake weakened to release/acquire (step 9)</td><td><code>TwoThreads_NoSpinning</code>, <code>TwoThreads_TinyBuffer</code>, <code>PingPongAlwaysSleeping</code></td><td>hang, every run</td></tr>
+      <tr><td>Producer waits without publishing first (step 8)</td><td><code>TwoThreads_SmallBuffer</code></td><td>hang</td></tr>
+      <tr><td>Positions compared directly instead of with <code>Distance()</code> (step 2)</td><td><code>TwoThreads_PositionOverflow</code></td><td>hang</td></tr>
+      <tr><td>Consumer wraps on <code>&gt;=</code> instead of <code>&gt;</code> (step 6)</td><td><code>TwoThreads_SmallBuffer</code></td><td>out-of-sequence record</td></tr>
+      <tr><td>Producer may overrun the consumer by 64 bytes (step 8)</td><td><code>TwoThreads_SmallBuffer</code></td><td>corrupted payload</td></tr>
+      <tr><td>Consumer waits without releasing lazily finished bytes (step 11)</td><td><code>LazyReleaseBeforeConsumerWaits</code></td><td>hang</td></tr>
+      <tr><td>End-of-batch marker releases lazily (step 12)</td><td><code>TicketDoesNotWaitForLaterCommands</code></td><td>wait over 50 ms</td></tr>
+      <tr><td>Payloads written without their alignment (step 12)</td><td><code>PayloadsRoundTrip</code></td><td>stream out of sync, hang</td></tr>
+    </tbody>
+  </table></div>
+  <p>All nine were caught. The suite also passes in Debug, under AddressSanitizer, and 20 times in a row in Release. <code>ctest</code> also runs <code>StoreBufferingLitmus</code>, which fails if <code>seq_cst</code> operations ever show the store-buffering outcome.</p>
+  <div class="codeblock"><div class="file"><b>build and test</b><span>Windows, Visual Studio 2022 or later</span></div>
+<pre><code class="nohighlight">build.cmd            :: Debug and Release, then ctest
+build.cmd bench      :: also runs the benchmark</code></pre></div>
+</section>
+
+<section id="numbers">
+  <p class="eyebrow">Performance</p>
+  <h2>Measurements</h2>
+  <p>AMD Ryzen 7 9700X (8 cores), Windows 11, MSVC 19.51 with <code>/O2</code>. Each number is the median of five runs of <code>bench/Benchmark.cpp</code>, and runs vary by up to about 30%. The ring buffer is 1 MB, and its state fits in L2 cache.</p>
+  <div class="chart" role="img" aria-label="Ring buffer throughput in nanoseconds per 4-byte int: 5.61 publishing and releasing every item, 1.86 every 16 items, 0.75 every 256 items, 0.85 with lazy release, 1.56 every 16 items without spinning.">
+    <h4>Ring buffer: 100 million 4-byte ints</h4>
+    <p class="sub">nanoseconds per int · shorter is faster</p>
+    <div class="bars">
+      <span class="name">publish + release every item</span>
+      <span class="track" title="5.61 ns per int (178 M/s)"><span class="bar" style="width: 100%"></span><span class="val">5.61 ns</span></span>
+      <span class="name">publish + release every 16 items</span>
+      <span class="track" title="1.86 ns per int (537 M/s)"><span class="bar" style="width: 33.2%"></span><span class="val">1.86 ns</span></span>
+      <span class="name">publish + release every 256 items</span>
+      <span class="track" title="0.75 ns per int (1335 M/s)"><span class="bar" style="width: 13.4%"></span><span class="val">0.75 ns</span></span>
+      <span class="name">publish every 16, FinishReadLazy() every item</span>
+      <span class="track" title="0.85 ns per int (1171 M/s)"><span class="bar" style="width: 15.2%"></span><span class="val">0.85 ns</span></span>
+      <span class="name">every 16 items, never spin</span>
+      <span class="track" title="1.56 ns per int (641 M/s)"><span class="bar" style="width: 27.8%"></span><span class="val">1.56 ns</span></span>
+    </div>
+  </div>
+  <div class="chart" role="img" aria-label="Command throughput in nanoseconds per command: 20.3 submitting after every command, 3.48 every 64 commands, 3.08 every 1024 commands, 47.1 for the mutex queue.">
+    <h4>Commands: 20 million, each a type and an 8-byte payload</h4>
+    <p class="sub">nanoseconds per command · shorter is faster · grey is the mutex baseline</p>
+    <div class="bars">
+      <span class="name">CommandBuffer, Submit() after every command</span>
+      <span class="track" title="20.25 ns per command (49.4 M/s)"><span class="bar" style="width: 43.0%"></span><span class="val">20.3 ns</span></span>
+      <span class="name">CommandBuffer, Submit() every 64 commands</span>
+      <span class="track" title="3.48 ns per command (287 M/s)"><span class="bar" style="width: 7.4%"></span><span class="val">3.48 ns</span></span>
+      <span class="name">CommandBuffer, Submit() every 1024 commands</span>
+      <span class="track" title="3.08 ns per command (324 M/s)"><span class="bar" style="width: 6.5%"></span><span class="val">3.08 ns</span></span>
+      <span class="name">mutex + condition_variable + deque&lt;QueuedCommand&gt;</span>
+      <span class="track" title="47.06 ns per command (21.3 M/s)"><span class="bar base" style="width: 100%"></span><span class="val">47.1 ns</span></span>
+    </div>
+  </div>
+  <p>The pattern is the same throughout: what costs time is the synchronization between the threads, not the copying of bytes. Every publish and release is a locked instruction plus a cache line crossing between cores, so the fewer of them per item, the faster. For reference, these are the numbers from Daugaard's own measurements, on a MacBook Pro with one billion ints, converted to nanoseconds per int:</p>
+  <div class="table-wrap"><table>
+    <thead><tr><th>Daugaard's measurement</th><th class="num">per int</th></tr></thead>
+    <tbody>
+      <tr><td>Version 1, reader and writer state not separated, finish every item</td><td class="num">36.0 ns</td></tr>
+      <tr><td>Version 1, not separated, finish every 16 items</td><td class="num">7.8 ns</td></tr>
+      <tr><td>Version 1, separate cache lines, finish every item</td><td class="num">1.7 ns</td></tr>
+      <tr><td>Version 1, separate cache lines, finish every 16 items</td><td class="num">1.2 ns</td></tr>
+      <tr><td><code>boost::lockfree::spsc_queue</code>, <code>-Os</code> / <code>-Ofast</code></td><td class="num">42 / 12 ns</td></tr>
+      <tr><td><code>memcpy</code> of the same amount of data</td><td class="num">1.1 ns</td></tr>
+    </tbody>
+  </table></div>
+  <p class="note">His version 1 has no sleeping, so its publish is a plain store. The semaphore support of step 9 is what makes per-item publishing more expensive here.</p>
+</section>
+
+<section id="rules">
+  <p class="eyebrow">Summary</p>
+  <h2>The contract</h2>
+  <p>Everything the code relies on, in one place:</p>
+  <ol>
+    <li>Exactly one producer thread and exactly one consumer thread.</li>
+    <li>The consumer reads the same sizes and alignments, in the same order, as the producer wrote. For commands: each <code>case</code> reads exactly the payload and arrays its producer function wrote, one read per statement.</li>
+    <li>Alignments are powers of two up to 64; a single allocation fits in the capacity.</li>
+    <li>Data written is invisible to the consumer until <code>FinishWrite()</code> or <code>Submit()</code>, or until the producer has to wait for space.</li>
+    <li>References from <code>Read()</code> and <code>ReadPayload()</code> are valid until <code>FinishRead()</code> or <code>FinishCommand()</code>, or until a lazy release is published.</li>
+    <li>The consumer does not wait for new data while holding more than about half the capacity in unfinished reads. Commands are at most half the capacity.</li>
+    <li>Payloads are plain data. A <code>case</code> does not record into its own buffer and does not wait for the producer.</li>
+    <li>Publish and submit in batches. Per-item synchronization costs more than all the rest of the work.</li>
+  </ol>
+</section>
+
+<section id="next">
+  <p class="eyebrow">Extensions</p>
+  <h2>Going further</h2>
+  <ul>
+    <li><strong>Several producers.</strong> Give each producer thread its own command buffer, and have the consumer drain them in a fixed order, or hand whole recorded buffers over at a sync point.</li>
+    <li><strong>A consumer with other work.</strong> A non-blocking <code>TryReadCommand()</code> needs a <code>PrepareRead()</code> variant that returns null instead of waiting.</li>
+    <li><strong>Writing arrays in place.</strong> A variant of <code>WriteArray()</code> could return a pointer for the producer to fill, which saves a copy for large uploads.</li>
+    <li><strong>One list of commands.</strong> With many commands, the enum, the producer functions and the <code>case</code> labels can be generated from a single X-macro list, so they cannot drift apart.</li>
+    <li><strong>Larger cache lines.</strong> Apple M-series cores use 128-byte lines, and some Intel cores prefetch lines in pairs. Raising <code>kCacheLineSize</code> to 128 keeps the separation intact there.</li>
+    <li><strong>Adaptive spinning.</strong> The best spin count depends on how long waits usually last. A thread could track how often its spin succeeds and adjust the count.</li>
+  </ul>
+</section>
+
+<section id="refs">
+  <p class="eyebrow">Sources</p>
+  <h2>References</h2>
+  <ul>
+    <li>Kaspar Daugaard, <a href="https://www.daugaard.org/blog/writing-a-fast-and-versatile-spsc-ring-buffer/">Writing a Fast and Versatile SPSC Ring Buffer</a>, 2018. The byte ring, local and shared state, prepare/finish, gaps at the wrap.</li>
+    <li>Kaspar Daugaard, <a href="https://www.daugaard.org/blog/writing-a-fast-and-versatile-spsc-ring-buffer--performance-results/">Writing a Fast and Versatile SPSC Ring Buffer: Performance Results</a>, 2018. The cache-line and batching measurements quoted above.</li>
+    <li>Kaspar Daugaard, <a href="https://www.daugaard.org/blog/how-to-make-your-spsc-ring-buffer-do-nothing-more-efficiently/">How To Make Your SPSC Ring Buffer Do Nothing, More Efficiently</a>, 2018. The semaphore handshake with the re-check.</li>
+    <li>Jeff Preshing, <a href="https://preshing.com/20120913/acquire-and-release-semantics/">Acquire and Release Semantics</a>, 2012.</li>
+    <li>Jeff Preshing, <a href="https://preshing.com/20120515/memory-reordering-caught-in-the-act/">Memory Reordering Caught in the Act</a>, 2012. The store-buffer reordering that step 9 guards against.</li>
+    <li><a href="https://en.cppreference.com/w/cpp/atomic/memory_order">std::memory_order</a> on cppreference, for the formal rules of sequentially consistent ordering.</li>
+  </ul>
+  <footer>The code this guide describes: <code>include/cb/SpscRingBuffer.h</code> and <code>include/cb/CommandBuffer.h</code>, with tests in <code>tests/Tests.cpp</code>. Numbers measured in October 2026.</footer>
+</section>
+
+</main>
+</div>
+
+<script src="https://cdnjs.cloudflare.com/ajax/libs/highlight.js/11.9.0/highlight.min.js"></script>
+<script>
+// Syntax highlighting is optional: without the CDN the code stays plain.
+try { if (window.hljs) hljs.highlightAll(); } catch (e) {}
+
+// ---------------------------------------------------------------- hero strip
+function drawHeroStrip() {
+  var g = document.getElementById('hero-cells');
+  if (!g) return;
+  var ns = 'http://www.w3.org/2000/svg';
+  for (var i = 0; i < 32; i++) {
+    var cls = 'f-free';
+    if (i >= 6 && i < 12) cls = 'f-read';
+    else if (i >= 12 && i < 22) cls = 'f-pub';
+    else if (i >= 22 && i < 26) cls = 'f-unpub';
+    var r = document.createElementNS(ns, 'rect');
+    r.setAttribute('x', 20 + i * 22.5 + 1);
+    r.setAttribute('y', 92);
+    r.setAttribute('width', 20.5);
+    r.setAttribute('height', 46);
+    r.setAttribute('rx', 2);
+    r.setAttribute('class', cls);
+    g.appendChild(r);
+  }
+}
+drawHeroStrip();
+
+// ---------------------------------------------------------------- step index highlight
+var stepLinks = [];
+
+function onSectionsVisible(entries) {
+  for (var i = 0; i < entries.length; i++) {
+    if (!entries[i].isIntersecting) continue;
+    var href = '#' + entries[i].target.id;
+    for (var j = 0; j < stepLinks.length; j++)
+      stepLinks[j].classList.toggle('active', stepLinks[j].getAttribute('href') === href);
+  }
+}
+
+function initStepIndex() {
+  stepLinks = Array.prototype.slice.call(document.querySelectorAll('.toc a'));
+  if (!stepLinks.length || !('IntersectionObserver' in window)) return;
+  var observer = new IntersectionObserver(onSectionsVisible, { rootMargin: '-20% 0px -70% 0px' });
+  var sections = document.querySelectorAll('main section[id]');
+  for (var i = 0; i < sections.length; i++) observer.observe(sections[i]);
+}
+initStepIndex();
+
+// ---------------------------------------------------------------- simulator
+// A one-thread port of PrepareWrite / WriteSlowPath / FinishWrite / PrepareRead /
+// ReadSlowPath / FinishRead from include/cb/SpscRingBuffer.h. Where the real code would
+// wait, the simulator stops and explains instead.
+var CAP = 256, CELL = 8, N = CAP / CELL;
+var sim = null;      // the simulated ring buffer state
+var simUi = null;    // DOM elements
+var playTimer = null;
+var playStep = 0;
+
+// The scripted wrap-around, one entry per step: [operation, size, alignment].
+var PLAY_SCRIPT = [
+  ['write', 64, 8], ['write', 64, 8], ['write', 64, 8], ['finishWrite'],
+  ['read'], ['read'], ['finishRead'],
+  ['write', 96, 8], ['finishWrite'],
+  ['read'], ['read'], ['finishRead']
+];
+
+function simReset() {
+  sim = {
+    w: { pos: 0, end: CAP, base: 0 },
+    r: { pos: 0, end: 0, base: 0 },
+    published: 0, released: 0,
+    blocks: [], next: 0, nextId: 1,
+    cells: []
+  };
+  for (var i = 0; i < N; i++) sim.cells.push({ kind: 'empty', stream: -1, id: 0, first: false });
+}
+
+function alignUp(p, a) { return Math.ceil(p / a) * a; }
+function lapOf(base) { return base / CAP + 1; }
+
+function markCells(from, to, base, kind, id) {
+  for (var o = from; o < to; o += CELL)
+    sim.cells[o / CELL] = { kind: kind, stream: base + o, id: id, first: o === from };
+}
+
+function say(html, tone) {
+  simUi.log.innerHTML = html;
+  simUi.log.className = 'sim-log' + (tone ? ' ' + tone : '');
+}
+
+function simWrite(size, align) {
+  var w = sim.w;
+  var label = '<code>PrepareWrite(' + size + ', ' + align + ')</code>';
+  var pos = alignUp(w.pos, align), end = pos + size, base = w.base;
+  var alignedPos = pos, wrapped = false, slow = false;
+  if (end > w.end) {
+    slow = true;
+    if (end > CAP) { wrapped = true; end -= pos; pos = 0; base += CAP; }
+    if (base + end > sim.released + CAP) {
+      var before = sim.published;
+      sim.published = w.base + w.pos;  // FinishWrite() before waiting (rule 2)
+      simRender();
+      say(label + ' has to wait. It needs the consumer to release up to stream position ' + (base + end - CAP) +
+        ', and only ' + sim.released + ' is released.' +
+        (sim.published !== before ? ' Before it sleeps it publishes what it has written (published is now ' + sim.published + '), so the consumer can make progress.' : ''), 'wait');
+      return;
+    }
+  }
+  var id = sim.nextId++;
+  var msg;
+  if (wrapped) {
+    markCells(w.pos, CAP, w.base, 'gap', 0);
+    msg = label + ': slow path. Block #' + id + ' does not fit between offset ' + alignedPos + ' and the end of the buffer, so the producer leaves a ' +
+      (CAP - w.pos) + '-byte gap and starts the block at offset 0 of lap ' + lapOf(base) + '.';
+  } else {
+    if (pos > w.pos) markCells(w.pos, pos, base, 'pad', 0);
+    msg = label + ': ' + (slow ? 'slow path' : 'fast path') + '. Block #' + id + ' at offsets ' + pos + '–' + end + '.' +
+      (pos > w.pos ? ' ' + (pos - w.pos) + ' bytes of padding before it for the alignment.' : '');
+  }
+  markCells(pos, end, base, 'data', id);
+  sim.blocks.push({ id: id, size: size, align: align });
+  if (slow) {
+    var oldEnd = w.end;
+    w.end = Math.min(sim.released + CAP - base, CAP);
+    msg += ' The block passed the cached end (' + oldEnd + '), so the producer loaded the consumer\'s released position (' + sim.released + ') and moved its end to ' + w.end + '.';
+  } else {
+    msg += ' It stays below the cached end (' + w.end + '), so nothing shared was touched.';
+  }
+  w.base = base; w.pos = end;
+  simRender();
+  say(msg + ' The consumer cannot see it until <code>FinishWrite()</code>.', 'ok');
+}
+
+function simFinishWrite() {
+  sim.published = sim.w.base + sim.w.pos;
+  simRender();
+  say('<code>FinishWrite()</code>: the published position is now ' + sim.published + '. The consumer may read everything before it.', 'ok');
+}
+
+function simRead() {
+  var r = sim.r;
+  if (sim.next >= sim.blocks.length) {
+    say('The producer has not written another block. The consumer would wait (spin, then sleep) until one is published.', 'wait');
+    return;
+  }
+  var b = sim.blocks[sim.next];
+  var label = '<code>PrepareRead(' + b.size + ', ' + b.align + ')</code>';
+  var pos = alignUp(r.pos, b.align), end = pos + b.size, base = r.base;
+  var alignedPos = pos, wrapped = false, slow = false;
+  if (end > r.end) {
+    slow = true;
+    if (end > CAP) { wrapped = true; end -= pos; pos = 0; base += CAP; }
+    if (base + end > sim.published) {
+      say(label + ' for block #' + b.id + ' has to wait: the block ends at stream position ' + (base + end) +
+        ', but the producer has only published up to ' + sim.published + '. Try <code>FinishWrite()</code>.', 'wait');
+      return;
+    }
+  }
+  var msg = label + ': ' + (slow ? 'slow path' : 'fast path') + '. ';
+  if (wrapped)
+    msg += 'Block #' + b.id + ' does not fit after offset ' + alignedPos + ' either, so the consumer skips the same gap and continues at offset 0 of lap ' + lapOf(base) + '. No marker was needed. ';
+  else
+    msg += 'Block #' + b.id + ' is read in place at offsets ' + pos + '–' + end + '. ';
+  if (slow) {
+    r.end = Math.min(sim.published - base, CAP);
+    msg += 'The consumer loaded the producer\'s published position (' + sim.published + ') and moved its cached end to ' + r.end + '.';
+  } else {
+    msg += 'It stays below the cached end (' + r.end + '), so nothing shared was touched.';
+  }
+  r.base = base; r.pos = end; sim.next++;
+  simRender();
+  say(msg + ' The bytes stay reserved until <code>FinishRead()</code>.', 'ok');
+}
+
+function simFinishRead() {
+  sim.released = sim.r.base + sim.r.pos;
+  simRender();
+  say('<code>FinishRead()</code>: the released position is now ' + sim.released + '. The producer may reuse everything before it.', 'ok');
+}
+
+function cellState(c) {
+  if (c.kind === 'empty' || c.stream < sim.released) return 'free';
+  if (c.kind === 'gap' || c.kind === 'pad') return 'skip';
+  if (c.stream >= sim.published) return 'unpublished';
+  if (c.stream >= sim.r.base + sim.r.pos) return 'published';
+  return 'reading';
+}
+
+// Stream positions that end a lap are drawn at the right edge (256), not at 0.
+function offsetOf(x) { return x === 0 ? 0 : ((x - 1) % CAP) + 1; }
+
+function setPin(lane, offset, text, cls) {
+  lane.innerHTML = '';
+  var p = document.createElement('div');
+  p.className = 'pin ' + cls + (offset > CAP * 0.82 ? ' flip' : '');
+  p.style.left = (offset / CAP * 100) + '%';
+  var t = document.createElement('span');
+  t.textContent = text;
+  p.appendChild(t);
+  lane.appendChild(p);
+}
+
+function simRender() {
+  for (var i = 0; i < N; i++) {
+    var c = sim.cells[i], st = cellState(c);
+    simUi.cells[i].className = 'cell ' + st;
+    simUi.cells[i].innerHTML = (c.kind === 'data' && c.first && st !== 'free') ? '<span class="id">' + c.id + '</span>' : '';
+  }
+  setPin(simUi.lanes.wend, sim.w.end, 'producer\'s cached end ' + sim.w.end, 'p dim');
+  setPin(simUi.lanes.pub, offsetOf(sim.published), 'published ' + sim.published, 'p');
+  setPin(simUi.lanes.w, sim.w.pos, 'write pos ' + (sim.w.base + sim.w.pos), 'p');
+  setPin(simUi.lanes.r, sim.r.pos, 'read pos ' + (sim.r.base + sim.r.pos), 'c');
+  setPin(simUi.lanes.rel, offsetOf(sim.released), 'released ' + sim.released, 'c');
+  setPin(simUi.lanes.rend, sim.r.end, 'consumer\'s cached end ' + sim.r.end, 'c dim');
+  var readPos = sim.r.base + sim.r.pos;
+  simUi.readout.innerHTML =
+    '<dl><dt class="head p">Producer</dt>' +
+    '<dt>write position</dt><dd>' + (sim.w.base + sim.w.pos) + '</dd>' +
+    '<dt>lap, offset</dt><dd>' + lapOf(sim.w.base) + ', ' + sim.w.pos + '</dd>' +
+    '<dt>published</dt><dd>' + sim.published + '</dd>' +
+    '<dt>cached end</dt><dd>' + sim.w.end + '</dd></dl>' +
+    '<dl><dt class="head c">Consumer</dt>' +
+    '<dt>read position</dt><dd>' + readPos + '</dd>' +
+    '<dt>lap, offset</dt><dd>' + lapOf(sim.r.base) + ', ' + sim.r.pos + '</dd>' +
+    '<dt>released</dt><dd>' + sim.released + '</dd>' +
+    '<dt>cached end</dt><dd>' + sim.r.end + '</dd></dl>' +
+    '<dl><dt class="head">In flight</dt>' +
+    '<dt>published, unread</dt><dd>' + Math.max(sim.published - readPos, 0) + ' B</dd>' +
+    '<dt>held by consumer</dt><dd>' + (readPos - sim.released) + ' B</dd>' +
+    '<dt>free for producer</dt><dd>' + (sim.released + CAP - (sim.w.base + sim.w.pos)) + ' B</dd></dl>';
+}
+
+// Runs one entry of PLAY_SCRIPT.
+function runScriptStep(step) {
+  switch (step[0]) {
+    case 'write':
+    {
+      simWrite(step[1], step[2]);
+      break;
+    }
+    case 'finishWrite':
+    {
+      simFinishWrite();
+      break;
+    }
+    case 'read':
+    {
+      simRead();
+      break;
+    }
+    case 'finishRead':
+    {
+      simFinishRead();
+      break;
+    }
+  }
+}
+
+function setButtonsDisabled(disabled) {
+  for (var i = 0; i < simUi.buttons.length; i++)
+    if (simUi.buttons[i] !== simUi.play) simUi.buttons[i].disabled = disabled;
+}
+
+function stopPlay() {
+  if (playTimer) { clearTimeout(playTimer); playTimer = null; }
+  setButtonsDisabled(false);
+  simUi.play.textContent = 'Play: a wrap-around';
+}
+
+function playNextStep() {
+  runScriptStep(PLAY_SCRIPT[playStep]);
+  simUi.log.innerHTML = '<strong>Step ' + (playStep + 1) + ' of ' + PLAY_SCRIPT.length + '.</strong> ' + simUi.log.innerHTML;
+  playStep++;
+  if (playStep < PLAY_SCRIPT.length) playTimer = setTimeout(playNextStep, 2600);
+  else stopPlay();
+}
+
+function onPlayClick() {
+  if (playTimer) { stopPlay(); return; }
+  simReset();
+  simRender();
+  setButtonsDisabled(true);
+  simUi.play.textContent = 'Stop';
+  playStep = 0;
+  playNextStep();
+}
+
+function onWriteClick(event) {
+  var button = event.currentTarget;
+  simWrite(+button.dataset.size, +button.dataset.align);
+}
+
+function onResetClick() {
+  stopPlay();
+  simReset();
+  simRender();
+  say('Empty buffer. The producer\'s cached end is 256: it may fill the whole buffer before it needs to look at the consumer. The consumer\'s cached end is 0: it knows of nothing to read.');
+}
+
+function initSimulator() {
+  var cellsEl = document.getElementById('sim-cells');
+  if (!cellsEl) return;
+  simUi = {
+    cells: [],
+    log: document.getElementById('sim-log'),
+    readout: document.getElementById('sim-readout'),
+    play: document.getElementById('sim-play'),
+    buttons: Array.prototype.slice.call(document.querySelectorAll('#sim button')),
+    lanes: {
+      wend: document.getElementById('lane-wend'), pub: document.getElementById('lane-pub'), w: document.getElementById('lane-w'),
+      r: document.getElementById('lane-r'), rel: document.getElementById('lane-rel'), rend: document.getElementById('lane-rend')
+    }
+  };
+  for (var i = 0; i < N; i++) {
+    var c = document.createElement('div');
+    c.className = 'cell';
+    cellsEl.appendChild(c);
+    simUi.cells.push(c);
+  }
+  var writeButtons = document.querySelectorAll('#sim button[data-size]');
+  for (var j = 0; j < writeButtons.length; j++) writeButtons[j].addEventListener('click', onWriteClick);
+  document.getElementById('sim-fw').addEventListener('click', simFinishWrite);
+  document.getElementById('sim-r').addEventListener('click', simRead);
+  document.getElementById('sim-fr').addEventListener('click', simFinishRead);
+  document.getElementById('sim-reset').addEventListener('click', onResetClick);
+  simUi.play.addEventListener('click', onPlayClick);
+  simReset();
+  simRender();
+}
+initSimulator();
+</script>
+</body>
+</html>
