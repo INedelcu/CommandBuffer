@@ -537,9 +537,10 @@ renderThread.join();</code></pre></div>
 <section id="baseline">
   <p class="eyebrow">Starting point</p>
   <h2>The obvious version</h2>
-  <p>Most people start with a mutex, a condition variable and a queue of fixed-size command structs:</p>
+  <p>Most people start with the textbook thread-safe queue. It has three parts: a container that holds the commands, a mutex that makes the container safe to use from two threads, and a condition variable that lets the consumer sleep while there is nothing to do. This is the version the measurements compare against:</p>
   <div class="codeblock"><div class="file"><b>bench/Benchmark.cpp</b><span>the baseline</span></div>
-<pre><code class="language-cpp">struct QueuedCommand
+<pre><code class="language-cpp">// Every command is a fixed-size struct, pushed and popped under a mutex.
+struct QueuedCommand
 {
     cb::CommandType type;
     std::uint64_t value;
@@ -550,6 +551,7 @@ struct MutexQueue
     std::mutex mutex;
     std::condition_variable notEmpty;
     std::deque&lt;QueuedCommand&gt; queue;
+    std::uint64_t sum = 0;
 
     void Push(const QueuedCommand&amp; command)   // game thread
     {
@@ -569,14 +571,100 @@ struct MutexQueue
         queue.pop_front();
         return command;
     }
+
+    void ExecuteUntilStopped()                 // render thread
+    {
+        for (;;)
+        {
+            QueuedCommand command = Pop();
+            switch (command.type)
+            {
+                case kCmd_Add:
+                {
+                    sum += command.value;
+                    break;
+                }
+                case cb::kCmd_Stop:
+                {
+                    return;
+                }
+            }
+        }
+    }
 };</code></pre></div>
-  <p>The render thread pops commands in a loop and switches on <code>command.type</code>. It is correct, and for a few hundred commands per frame it is fine. Its costs grow with the command count:</p>
+  <p>The benchmark starts the render thread on <code>ExecuteUntilStopped()</code>, pushes 20 million commands from the game thread, and ends with <code>kCmd_Stop</code>:</p>
+  <div class="codeblock"><div class="file"><b>bench/Benchmark.cpp</b><span>RunMutexQueue()</span></div>
+<pre><code class="language-cpp">MutexQueue queue;
+std::thread consumer(&amp;MutexQueue::ExecuteUntilStopped, &amp;queue);   // the render thread
+for (std::uint64_t i = 0; i &lt; kCommands; ++i)
+    queue.Push(QueuedCommand{kCmd_Add, i});
+queue.Push(QueuedCommand{cb::kCmd_Stop, 0});
+consumer.join();</code></pre></div>
+  <p>The rest of this section walks through each piece. If it is all familiar, skip to <a href="#baseline-cost">why it is slow</a>.</p>
+
+  <h3>The command type</h3>
+  <p>Every element of the queue has the same type, so every command gets the same fixed-size slot: a type and one 8-byte payload. That works for the benchmark's <code>kCmd_Add</code>. A <code>Draw</code> command with a 16-byte payload would not fit, unless <code>value</code> became a union as large as the biggest command, and then every command pays for the biggest one. A <code>CreateMesh</code> with its vertex array would need a pointer to separately allocated memory. That limit is why <a href="#step-1">step 1</a> switches to a ring of raw bytes, where each command takes exactly the space it needs.</p>
+
+  <h3>What each member is for</h3>
+  <dl class="orders">
+    <div>
+      <dt>std::deque<span>the commands</span></dt>
+      <dd>
+        <p>The commands waiting to run, oldest first. A deque ("double-ended queue") adds at the back and removes from the front in constant time. A <code>std::vector</code> would be wrong here, because removing its first element shifts every other element down by one. A <code>std::list</code> allocates memory for every single element. A <code>std::queue</code> would be the same thing, because by default it is a thin wrapper around a <code>std::deque</code>.</p>
+        <p class="here">A deque has no fixed capacity. It allocates more memory blocks as it grows, so the producer never waits for space, and the queue keeps growing if the consumer falls behind. In MSVC's implementation a block holds 16 bytes, which for these 16-byte commands means one block per command whenever the queue grows. The ring buffer is the opposite: fixed capacity, and the producer waits when it is full.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>std::mutex<span>protects the deque</span></dt>
+      <dd>
+        <p><code>std::deque</code> is not thread-safe. A <code>push_back</code> on one thread at the same moment as a <code>pop_front</code> on the other can corrupt its internal pointers. That is a data race, and undefined behavior. So every access to <code>queue</code> happens while the mutex is locked, and only one thread can hold it at a time.</p>
+        <p class="here"><code>std::lock_guard</code> and <code>std::unique_lock</code> lock the mutex in their constructor and unlock it in their destructor, so the mutex is released on every way out of the scope.</p>
+      </dd>
+    </div>
+    <div>
+      <dt>std::condition_variable<span>wakes the consumer</span></dt>
+      <dd>
+        <p>Lets the consumer sleep until there is work. Without it, the render thread would have to lock, check, unlock and repeat in a loop, and burn a whole core while waiting. A condition variable is usually named after the condition it announces; here, "the queue is not empty".</p>
+      </dd>
+    </div>
+    <div>
+      <dt>sum<span>benchmark only</span></dt>
+      <dd>
+        <p>The consumer's "work": <code>kCmd_Add</code> adds its value, so the benchmark can check the result at the end. It is not part of the queue.</p>
+      </dd>
+    </div>
+  </dl>
+
+  <h3>How the condition variable is used</h3>
+  <p>A condition variable always works together with a mutex and a condition that you check yourself, here <code>!queue.empty()</code>. It has a waiting side and a notifying side:</p>
+  <div class="codeblock"><div class="file"><b>Pop()</b><span>render thread, the waiting side</span></div>
+<pre><code class="language-cpp">std::unique_lock lock(mutex);          // 1. lock the mutex
+while (queue.empty())                  // 2. check the condition while holding it
+    notEmpty.wait(lock);               // 3. unlock and sleep; lock again when woken
+QueuedCommand command = queue.front();
+queue.pop_front();
+return command;                        // 4. the unique_lock's destructor unlocks</code></pre></div>
+  <div class="codeblock"><div class="file"><b>Push()</b><span>game thread, the notifying side</span></div>
+<pre><code class="language-cpp">{
+    std::lock_guard lock(mutex);       // 1. lock the mutex
+    queue.push_back(command);          // 2. change the state while holding it
+}                                      // 3. the lock_guard's destructor unlocks
+notEmpty.notify_one();                 // 4. wake one waiting thread, if any</code></pre></div>
+  <p><code>wait(lock)</code> does three things: it unlocks the mutex, puts the thread to sleep, and, when the thread is woken, locks the mutex again before returning. Unlocking and going to sleep happen as one step, and that is the key detail. If they were two separate steps, the producer could push a command and notify in the gap between them. The notification would reach nobody, and the consumer would sleep with a command waiting. That is the same lost wake-up that <a href="#step-9">step 9</a> solves by hand for the ring buffer, with a flag, a re-check and sequentially consistent operations.</p>
   <ul>
-    <li>Both threads take the same mutex and touch the same deque for every command, so the cache lines holding them move back and forth between two cores.</li>
-    <li>Every command is as large as the largest one. A command with variable-size data, such as a mesh upload with its vertices, has to allocate that data somewhere else and carry a pointer. <code>std::deque</code> also allocates a new block every few elements.</li>
-    <li><code>notify_one()</code> calls into the OS wait machinery for every command.</li>
+    <li><strong>Why <code>std::unique_lock</code> in <code>Pop()</code>.</strong> <code>wait()</code> has to unlock and relock the mutex. A <code>std::lock_guard</code> can never be unlocked before its destructor runs; a <code>std::unique_lock</code> can. <code>Push()</code> never needs that, so the simpler <code>lock_guard</code> is enough there.</li>
+    <li><strong>Why <code>while</code> and not <code>if</code>.</strong> A thread may wake up without anyone notifying it, a "spurious wakeup" that the standard allows. So the condition is checked again after every wake-up, and the thread continues only when the queue really has something in it.</li>
+    <li><strong>Why the extra braces in <code>Push()</code>.</strong> They end the <code>lock_guard</code>'s scope, so the mutex is unlocked before <code>notify_one()</code>. If the producer notified while still holding the mutex, the consumer would wake up and immediately block on that same locked mutex. Both orders are correct; notifying after unlocking avoids the wasted round trip.</li>
   </ul>
-  <p>On the test machine it moves 20 million commands at <strong>47 ns</strong> each. The finished command buffer runs the same benchmark at <strong>3.1 to 3.5 ns</strong> per command when the producer submits in batches. The <a href="#numbers">measurements</a> section has the details.</p>
+
+  <h3 id="baseline-cost">Why it is slow</h3>
+  <p>The queue is correct, and for a few hundred commands per frame it is fine. But its costs come with every single command:</p>
+  <ul>
+    <li><strong>Both threads lock and unlock the same mutex.</strong> Each lock and unlock is an atomic operation on one shared cache line, which keeps moving between the two cores. The deque's internal pointers move between the cores too.</li>
+    <li><strong>The producer calls <code>notify_one()</code>.</strong> That is a call into the operating system's condition-variable code every time: cheap when nobody is waiting, and a real kernel wake-up when the consumer is asleep.</li>
+    <li><strong>The deque allocates memory</strong> whenever it grows, and every command is as large as the largest one.</li>
+  </ul>
+  <p>On the test machine it moves 20 million commands at <strong>47 ns</strong> each. The finished command buffer runs the same benchmark at <strong>3.1 to 3.5 ns</strong> per command when the producer submits in batches. On its fast path each thread writes only to its own cache line, the two threads synchronize only at <code>Submit()</code> or when one of them has to wait, and nothing is allocated. The <a href="#numbers">measurements</a> section has the details.</p>
 </section>
 
 <section id="step-1">
